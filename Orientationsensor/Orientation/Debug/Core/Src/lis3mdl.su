@@ -1,0 +1,15 @@
+../Core/Src/lis3mdl.c:24:18:lis3mdl_init	24	static
+../Core/Src/lis3mdl.c:46:18:lis3mdl_read_who_am_i	16	static
+../Core/Src/lis3mdl.c:51:18:lis3mdl_check_who_am_i	24	static
+../Core/Src/lis3mdl.c:70:18:lis3mdl_configure_continuous	24	static
+../Core/Src/lis3mdl.c:115:18:lis3mdl_read_raw	24	static
+../Core/Src/lis3mdl.c:138:18:lis3mdl_read_gauss	24	static
+../Core/Src/lis3mdl.c:161:18:lis3mdl_read_calibrated	56	static
+../Core/Src/lis3mdl.c:197:6:lis3mdl_calibration_identity	16	static
+../Core/Src/lis3mdl.c:218:7:lis3mdl_lsb_per_gauss	16	static
+../Core/Src/lis3mdl.c:235:18:lis3mdl_write_register	24	static
+../Core/Src/lis3mdl.c:250:18:lis3mdl_read_register	24	static
+../Core/Src/lis3mdl.c:260:18:lis3mdl_read_registers	32	static
+../Core/Src/lis3mdl.c:297:16:lis3mdl_le16_to_i16	16	static
+../Core/Src/lis3mdl.c:302:16:lis3mdl_full_scale_bits	16	static
+../Core/Src/lis3mdl.c:307:25:lis3mdl_spi_write	32	static

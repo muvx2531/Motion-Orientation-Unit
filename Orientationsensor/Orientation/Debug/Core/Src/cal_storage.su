@@ -1,0 +1,8 @@
+../Core/Src/cal_storage.c:12:22:cal_storage_load	24	static
+../Core/Src/cal_storage.c:33:22:cal_storage_save	392	static
+../Core/Src/cal_storage.c:83:6:cal_storage_set_defaults	24	static
+../Core/Src/cal_storage.c:113:9:cal_storage_is_valid	24	static
+../Core/Src/cal_storage.c:134:10:cal_storage_crc32	32	static
+../Core/Src/cal_storage.c:165:35:cal_storage_flash_block	4	static
+../Core/Src/cal_storage.c:170:17:cal_storage_crc_length	4	static
+../Core/Src/cal_storage.c:175:29:cal_storage_program_block	48	static

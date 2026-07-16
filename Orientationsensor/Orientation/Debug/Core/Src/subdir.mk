@@ -5,7 +5,13 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
+../Core/Src/app_calibration.c \
+../Core/Src/cal_storage.c \
+../Core/Src/dps310.c \
+../Core/Src/lis3mdl.c \
 ../Core/Src/main.c \
+../Core/Src/mpu6500.c \
+../Core/Src/sensor_calibration.c \
 ../Core/Src/stm32g4xx_hal_msp.c \
 ../Core/Src/stm32g4xx_it.c \
 ../Core/Src/syscalls.c \
@@ -13,7 +19,13 @@ C_SRCS += \
 ../Core/Src/system_stm32g4xx.c 
 
 OBJS += \
+./Core/Src/app_calibration.o \
+./Core/Src/cal_storage.o \
+./Core/Src/dps310.o \
+./Core/Src/lis3mdl.o \
 ./Core/Src/main.o \
+./Core/Src/mpu6500.o \
+./Core/Src/sensor_calibration.o \
 ./Core/Src/stm32g4xx_hal_msp.o \
 ./Core/Src/stm32g4xx_it.o \
 ./Core/Src/syscalls.o \
@@ -21,7 +33,13 @@ OBJS += \
 ./Core/Src/system_stm32g4xx.o 
 
 C_DEPS += \
+./Core/Src/app_calibration.d \
+./Core/Src/cal_storage.d \
+./Core/Src/dps310.d \
+./Core/Src/lis3mdl.d \
 ./Core/Src/main.d \
+./Core/Src/mpu6500.d \
+./Core/Src/sensor_calibration.d \
 ./Core/Src/stm32g4xx_hal_msp.d \
 ./Core/Src/stm32g4xx_it.d \
 ./Core/Src/syscalls.d \
@@ -36,7 +54,7 @@ Core/Src/%.o Core/Src/%.su: ../Core/Src/%.c Core/Src/subdir.mk
 clean: clean-Core-2f-Src
 
 clean-Core-2f-Src:
-	-$(RM) ./Core/Src/main.d ./Core/Src/main.o ./Core/Src/main.su ./Core/Src/stm32g4xx_hal_msp.d ./Core/Src/stm32g4xx_hal_msp.o ./Core/Src/stm32g4xx_hal_msp.su ./Core/Src/stm32g4xx_it.d ./Core/Src/stm32g4xx_it.o ./Core/Src/stm32g4xx_it.su ./Core/Src/syscalls.d ./Core/Src/syscalls.o ./Core/Src/syscalls.su ./Core/Src/sysmem.d ./Core/Src/sysmem.o ./Core/Src/sysmem.su ./Core/Src/system_stm32g4xx.d ./Core/Src/system_stm32g4xx.o ./Core/Src/system_stm32g4xx.su
+	-$(RM) ./Core/Src/app_calibration.d ./Core/Src/app_calibration.o ./Core/Src/app_calibration.su ./Core/Src/cal_storage.d ./Core/Src/cal_storage.o ./Core/Src/cal_storage.su ./Core/Src/dps310.d ./Core/Src/dps310.o ./Core/Src/dps310.su ./Core/Src/lis3mdl.d ./Core/Src/lis3mdl.o ./Core/Src/lis3mdl.su ./Core/Src/main.d ./Core/Src/main.o ./Core/Src/main.su ./Core/Src/mpu6500.d ./Core/Src/mpu6500.o ./Core/Src/mpu6500.su ./Core/Src/sensor_calibration.d ./Core/Src/sensor_calibration.o ./Core/Src/sensor_calibration.su ./Core/Src/stm32g4xx_hal_msp.d ./Core/Src/stm32g4xx_hal_msp.o ./Core/Src/stm32g4xx_hal_msp.su ./Core/Src/stm32g4xx_it.d ./Core/Src/stm32g4xx_it.o ./Core/Src/stm32g4xx_it.su ./Core/Src/syscalls.d ./Core/Src/syscalls.o ./Core/Src/syscalls.su ./Core/Src/sysmem.d ./Core/Src/sysmem.o ./Core/Src/sysmem.su ./Core/Src/system_stm32g4xx.d ./Core/Src/system_stm32g4xx.o ./Core/Src/system_stm32g4xx.su
 
 .PHONY: clean-Core-2f-Src
 

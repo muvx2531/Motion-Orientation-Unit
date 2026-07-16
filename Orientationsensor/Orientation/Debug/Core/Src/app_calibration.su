@@ -1,0 +1,6 @@
+../Core/Src/app_calibration.c:6:6:app_calibration_init	24	static
+../Core/Src/app_calibration.c:43:6:app_calibration_process	32	static
+../Core/Src/app_calibration.c:152:6:app_calibration_update_mag	24	static
+../Core/Src/app_calibration.c:176:6:app_calibration_apply_stored	24	static
+../Core/Src/app_calibration.c:201:6:app_calibration_request	16	static
+../Core/Src/app_calibration.c:211:13:app_calibration_save_ok	16	static

@@ -1,0 +1,17 @@
+../Core/Src/mpu6500.c:32:18:mpu6500_init	32	static
+../Core/Src/mpu6500.c:93:18:mpu6500_read_who_am_i	16	static
+../Core/Src/mpu6500.c:98:18:mpu6500_read_raw	32	static
+../Core/Src/mpu6500.c:125:18:mpu6500_read_scaled	32	static
+../Core/Src/mpu6500.c:152:18:mpu6500_read_accel_raw	24	static
+../Core/Src/mpu6500.c:175:18:mpu6500_read_gyro_raw	24	static
+../Core/Src/mpu6500.c:198:18:mpu6500_read_temperature_raw	24	static
+../Core/Src/mpu6500.c:218:18:mpu6500_write_register	24	static
+../Core/Src/mpu6500.c:233:18:mpu6500_read_register	32	static
+../Core/Src/mpu6500.c:246:18:mpu6500_read_registers	32	static
+../Core/Src/mpu6500.c:279:7:mpu6500_accel_lsb_per_g	16	static
+../Core/Src/mpu6500.c:296:7:mpu6500_gyro_lsb_per_dps	16	static
+../Core/Src/mpu6500.c:313:25:mpu6500_spi_transfer	40	static
+../Core/Src/mpu6500.c:349:25:mpu6500_apply_config	16	static
+../Core/Src/mpu6500.c:394:16:mpu6500_be16_to_i16	16	static
+../Core/Src/mpu6500.c:399:16:mpu6500_gyro_fs_bits	16	static
+../Core/Src/mpu6500.c:404:16:mpu6500_accel_fs_bits	16	static

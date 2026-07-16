@@ -1,0 +1,17 @@
+../Core/Src/dps310.c:24:17:dps310_init	24	static
+../Core/Src/dps310.c:44:17:dps310_read_product_id	16	static
+../Core/Src/dps310.c:49:17:dps310_check_product_id	24	static
+../Core/Src/dps310.c:68:17:dps310_read_coefficients_raw	16	static
+../Core/Src/dps310.c:78:17:dps310_read_calibration	40	static
+../Core/Src/dps310.c:113:17:dps310_configure_continuous	24	static
+../Core/Src/dps310.c:154:17:dps310_read_pressure_raw	24	static
+../Core/Src/dps310.c:177:17:dps310_read_temperature_raw	24	static
+../Core/Src/dps310.c:200:17:dps310_read_compensated	48	static
+../Core/Src/dps310.c:245:17:dps310_write_register	24	static
+../Core/Src/dps310.c:260:17:dps310_read_register	24	static
+../Core/Src/dps310.c:270:17:dps310_read_registers	32	static
+../Core/Src/dps310.c:303:16:dps310_sign_extend_12	16	static
+../Core/Src/dps310.c:313:16:dps310_sign_extend_20	16	static
+../Core/Src/dps310.c:323:16:dps310_sign_extend_24	16	static
+../Core/Src/dps310.c:333:14:dps310_scaling_factor	16	static
+../Core/Src/dps310.c:358:24:dps310_spi_write	32	static

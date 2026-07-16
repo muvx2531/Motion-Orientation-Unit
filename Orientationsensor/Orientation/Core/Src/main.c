@@ -22,6 +22,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "app_calibration.h"
+#include "dps310.h"
+#include "lis3mdl.h"
+#include "mpu6500.h"
 
 /* USER CODE END Includes */
 
@@ -32,6 +36,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -46,6 +51,25 @@ UART_HandleTypeDef huart2;
 SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
+static mpu6500_t imu;
+static lis3mdl_t mag;
+static dps310_t prs;
+
+static mpu6500_config_t imu_config = {
+  .gyro_fs = MPU6500_GYRO_FS_500DPS,
+  .accel_fs = MPU6500_ACCEL_FS_4G,
+  .dlpf_cfg = 3U,
+  .sample_rate_divider = 9U
+};
+
+static lis3mdl_calibration_t mag_calibration;
+static dps310_calibration_t prs_calibration;
+static app_calibration_t calibration_app;
+
+volatile mpu6500_status_t imu_status = MPU6500_ERROR;
+volatile lis3mdl_status_t mag_status = LIS3MDL_ERROR;
+volatile dps310_status_t prs_status = DPS310_ERROR;
+volatile app_cal_command_t cal_command = APP_CAL_CMD_NONE;
 
 /* USER CODE END PV */
 
@@ -97,6 +121,33 @@ int main(void)
   MX_SPI1_Init();
   MX_USB_Device_Init();
   /* USER CODE BEGIN 2 */
+  app_calibration_init(&calibration_app, &imu, &mag, &prs, &prs_calibration, &mag_calibration);
+
+  HAL_GPIO_WritePin(SPI_MAG_CS_GPIO_Port, SPI_MAG_CS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(SPI_PRS_CS_GPIO_Port, SPI_PRS_CS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(SPI_IMU_CS_GPIO_Port, SPI_IMU_CS_Pin, GPIO_PIN_SET);
+
+  imu_status = mpu6500_init(&imu, &hspi1, SPI_IMU_CS_GPIO_Port, SPI_IMU_CS_Pin, &imu_config);
+  if (imu_status == MPU6500_OK)
+  {
+    app_calibration_request(&calibration_app, APP_CAL_CMD_GYRO_ZERO);
+  }
+
+  mag_status = lis3mdl_init(&mag, &hspi1, SPI_MAG_CS_GPIO_Port, SPI_MAG_CS_Pin);
+  if (mag_status == LIS3MDL_OK)
+  {
+    mag_status = lis3mdl_configure_continuous(&mag, LIS3MDL_FS_4_GAUSS);
+  }
+
+  prs_status = dps310_init(&prs, &hspi1, SPI_PRS_CS_GPIO_Port, SPI_PRS_CS_Pin);
+  if (prs_status == DPS310_OK)
+  {
+    prs_status = dps310_read_calibration(&prs, &prs_calibration);
+  }
+  if (prs_status == DPS310_OK)
+  {
+    prs_status = dps310_configure_continuous(&prs, DPS310_OVERSAMPLING_1, DPS310_OVERSAMPLING_1);
+  }
 
   /* USER CODE END 2 */
 
@@ -107,6 +158,14 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    if (cal_command != APP_CAL_CMD_NONE)
+    {
+      app_calibration_request(&calibration_app, cal_command);
+      cal_command = APP_CAL_CMD_NONE;
+    }
+    app_calibration_process(&calibration_app);
+    app_calibration_update_mag(&calibration_app);
+    HAL_Delay(1U);
   }
   /* USER CODE END 3 */
 }
