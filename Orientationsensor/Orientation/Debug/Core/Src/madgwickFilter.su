@@ -1,0 +1,8 @@
+../Core/Inc/madgwickFilter.h:45:20:quat_scalar	16	static
+../Core/Inc/madgwickFilter.h:53:20:quat_add	48	static
+../Core/Inc/madgwickFilter.h:61:20:quat_sub	48	static
+../Core/Inc/madgwickFilter.h:80:21:quat_Norm	24	static
+../Core/Inc/madgwickFilter.h:86:20:quat_Normalization	24	static
+../Core/Src/madgwickFilter.c:12:19:quat_mult	88	static
+../Core/Src/madgwickFilter.c:28:6:imu_filter	184	static
+../Core/Src/madgwickFilter.c:128:6:eulerAngles	40	static

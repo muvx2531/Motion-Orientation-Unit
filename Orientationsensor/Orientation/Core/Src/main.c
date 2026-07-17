@@ -25,17 +25,85 @@
 #include "app_calibration.h"
 #include "dps310.h"
 #include "lis3mdl.h"
+#include "madgwickFilter.h"
 #include "mpu6500.h"
+#include "usbd_cdc_if.h"
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct
+{
+  float x;
+  float y;
+  float z;
+} vec3f_t;
+
+typedef struct
+{
+  float roll_deg;
+  float pitch_deg;
+  float yaw_deg;
+} euler_angles_t;
+
+typedef struct
+{
+  uint64_t timestamp_us;
+  vec3f_t accel_mps2;
+  vec3f_t gyro_dps;
+  vec3f_t mag_uT;
+  float pressure_pa;
+  float temperature_c;
+  euler_angles_t euler;
+} telemetry_sample_t;
 
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/*
+ * Uncomment DO_CALIBRATE_SENSORS only when you want to run one-time calibration.
+ * After calibration is saved, comment it again and flash the board again.
+ */
+//#define DO_CALIBRATE_SENSORS
+
+#ifdef DO_CALIBRATE_SENSORS
+#define APP_CALIBRATE_MAG_MINMAX_DURATION_MS  30000U
+#define APP_CALIBRATE_LOAD_DEFAULTS_FIRST     0U
+#define APP_CALIBRATE_ACCEL_FROM_USER_VALUES  1U
+
+#define USER_CAL_ACCEL_POS_X_X_RAW            0.0f
+#define USER_CAL_ACCEL_POS_X_Y_RAW            0.0f
+#define USER_CAL_ACCEL_POS_X_Z_RAW            0.0f
+
+#define USER_CAL_ACCEL_NEG_X_X_RAW            0.0f
+#define USER_CAL_ACCEL_NEG_X_Y_RAW            0.0f
+#define USER_CAL_ACCEL_NEG_X_Z_RAW            0.0f
+
+#define USER_CAL_ACCEL_POS_Y_X_RAW            0.0f
+#define USER_CAL_ACCEL_POS_Y_Y_RAW            0.0f
+#define USER_CAL_ACCEL_POS_Y_Z_RAW            0.0f
+
+#define USER_CAL_ACCEL_NEG_Y_X_RAW            0.0f
+#define USER_CAL_ACCEL_NEG_Y_Y_RAW            0.0f
+#define USER_CAL_ACCEL_NEG_Y_Z_RAW            0.0f
+
+#define USER_CAL_ACCEL_POS_Z_X_RAW            0.0f
+#define USER_CAL_ACCEL_POS_Z_Y_RAW            0.0f
+#define USER_CAL_ACCEL_POS_Z_Z_RAW            0.0f
+
+#define USER_CAL_ACCEL_NEG_Z_X_RAW            0.0f
+#define USER_CAL_ACCEL_NEG_Z_Y_RAW            0.0f
+#define USER_CAL_ACCEL_NEG_Z_Z_RAW            0.0f
+#endif
+
+#define APP_SENSOR_READ_PERIOD_MS             10U
+#define APP_TELEMETRY_PERIOD_MS               100U
+#define APP_STANDARD_GRAVITY_MPS2             9.80665f
+#define APP_GAUSS_TO_MICROTESLA               100.0f
+#define APP_DEG_TO_RAD                        0.017453292519943295f
 
 /* USER CODE END PD */
 
@@ -66,10 +134,21 @@ static lis3mdl_calibration_t mag_calibration;
 static dps310_calibration_t prs_calibration;
 static app_calibration_t calibration_app;
 
+static mpu6500_raw_sample_t imu_raw_sample;
+static sensor_cal_vector_t accel_compensated_raw;
+static sensor_cal_vector_t gyro_compensated_raw;
+static lis3mdl_vector_t mag_raw_gauss;
+static lis3mdl_vector_t mag_compensated_gauss;
+static dps310_sample_t prs_compensated_sample;
+static telemetry_sample_t telemetry_sample;
+static uint32_t telemetry_last_send_ms = 0U;
+
 volatile mpu6500_status_t imu_status = MPU6500_ERROR;
 volatile lis3mdl_status_t mag_status = LIS3MDL_ERROR;
 volatile dps310_status_t prs_status = DPS310_ERROR;
-volatile app_cal_command_t cal_command = APP_CAL_CMD_NONE;
+volatile mpu6500_status_t imu_read_status = MPU6500_ERROR;
+volatile lis3mdl_status_t mag_read_status = LIS3MDL_ERROR;
+volatile dps310_status_t prs_read_status = DPS310_ERROR;
 
 /* USER CODE END PV */
 
@@ -80,6 +159,18 @@ static void MX_LPUART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
+static void App_SensorsInit(void);
+static void App_SensorsCalibrationSection(void);
+static void App_SensorsReadAndCompensate(void);
+static void App_OrientationUpdateMadgwick(void);
+static void App_TelemetryUpdateSample(uint64_t timestamp_us);
+static void App_TelemetrySendCdc(void);
+static int32_t App_FloatToInt32Scaled(float value, float scale);
+static uint64_t App_TimestampUs(void);
+#ifdef DO_CALIBRATE_SENSORS
+static void App_LoadUserAccelCalibrationSamples(void);
+static void App_CalibrateMagnetometerBlocking(void);
+#endif
 
 /* USER CODE END PFP */
 
@@ -121,33 +212,8 @@ int main(void)
   MX_SPI1_Init();
   MX_USB_Device_Init();
   /* USER CODE BEGIN 2 */
-  app_calibration_init(&calibration_app, &imu, &mag, &prs, &prs_calibration, &mag_calibration);
-
-  HAL_GPIO_WritePin(SPI_MAG_CS_GPIO_Port, SPI_MAG_CS_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(SPI_PRS_CS_GPIO_Port, SPI_PRS_CS_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(SPI_IMU_CS_GPIO_Port, SPI_IMU_CS_Pin, GPIO_PIN_SET);
-
-  imu_status = mpu6500_init(&imu, &hspi1, SPI_IMU_CS_GPIO_Port, SPI_IMU_CS_Pin, &imu_config);
-  if (imu_status == MPU6500_OK)
-  {
-    app_calibration_request(&calibration_app, APP_CAL_CMD_GYRO_ZERO);
-  }
-
-  mag_status = lis3mdl_init(&mag, &hspi1, SPI_MAG_CS_GPIO_Port, SPI_MAG_CS_Pin);
-  if (mag_status == LIS3MDL_OK)
-  {
-    mag_status = lis3mdl_configure_continuous(&mag, LIS3MDL_FS_4_GAUSS);
-  }
-
-  prs_status = dps310_init(&prs, &hspi1, SPI_PRS_CS_GPIO_Port, SPI_PRS_CS_Pin);
-  if (prs_status == DPS310_OK)
-  {
-    prs_status = dps310_read_calibration(&prs, &prs_calibration);
-  }
-  if (prs_status == DPS310_OK)
-  {
-    prs_status = dps310_configure_continuous(&prs, DPS310_OVERSAMPLING_1, DPS310_OVERSAMPLING_1);
-  }
+  App_SensorsInit();
+  App_SensorsCalibrationSection();
 
   /* USER CODE END 2 */
 
@@ -158,14 +224,13 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if (cal_command != APP_CAL_CMD_NONE)
-    {
-      app_calibration_request(&calibration_app, cal_command);
-      cal_command = APP_CAL_CMD_NONE;
-    }
-    app_calibration_process(&calibration_app);
-    app_calibration_update_mag(&calibration_app);
-    HAL_Delay(1U);
+    uint64_t timestamp_us = App_TimestampUs();
+
+    App_SensorsReadAndCompensate();
+    App_OrientationUpdateMadgwick();
+    App_TelemetryUpdateSample(timestamp_us);
+    App_TelemetrySendCdc();
+    HAL_Delay(APP_SENSOR_READ_PERIOD_MS);
   }
   /* USER CODE END 3 */
 }
@@ -400,6 +465,283 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+static void App_SensorsInit(void)
+{
+  app_calibration_init(&calibration_app, &imu, &mag, &prs, &prs_calibration, &mag_calibration);
+
+  HAL_GPIO_WritePin(SPI_MAG_CS_GPIO_Port, SPI_MAG_CS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(SPI_PRS_CS_GPIO_Port, SPI_PRS_CS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(SPI_IMU_CS_GPIO_Port, SPI_IMU_CS_Pin, GPIO_PIN_SET);
+
+  imu_status = mpu6500_init(&imu, &hspi1, SPI_IMU_CS_GPIO_Port, SPI_IMU_CS_Pin, &imu_config);
+
+  mag_status = lis3mdl_init(&mag, &hspi1, SPI_MAG_CS_GPIO_Port, SPI_MAG_CS_Pin);
+  if (mag_status == LIS3MDL_OK)
+  {
+    mag_status = lis3mdl_configure_continuous(&mag, LIS3MDL_FS_4_GAUSS);
+  }
+
+  prs_status = dps310_init(&prs, &hspi1, SPI_PRS_CS_GPIO_Port, SPI_PRS_CS_Pin);
+  if (prs_status == DPS310_OK)
+  {
+    prs_status = dps310_read_calibration(&prs, &prs_calibration);
+  }
+  if (prs_status == DPS310_OK)
+  {
+    prs_status = dps310_configure_continuous(&prs, DPS310_OVERSAMPLING_1, DPS310_OVERSAMPLING_1);
+  }
+}
+
+static void App_SensorsCalibrationSection(void)
+{
+#ifdef DO_CALIBRATE_SENSORS
+  #if (APP_CALIBRATE_LOAD_DEFAULTS_FIRST != 0U)
+    app_calibration_request(&calibration_app, APP_CAL_CMD_LOAD_DEFAULTS);
+    app_calibration_process(&calibration_app);
+  #endif
+
+  if (imu_status == MPU6500_OK)
+  {
+    app_calibration_request(&calibration_app, APP_CAL_CMD_GYRO_ZERO);
+    app_calibration_process(&calibration_app);
+
+  #if (APP_CALIBRATE_ACCEL_FROM_USER_VALUES != 0U)
+    App_LoadUserAccelCalibrationSamples();
+    app_calibration_request(&calibration_app, APP_CAL_CMD_ACCEL_COMPUTE_SAVE);
+    app_calibration_process(&calibration_app);
+  #endif
+  }
+
+  if (prs_status == DPS310_OK)
+  {
+    app_calibration_request(&calibration_app, APP_CAL_CMD_DPS310_REF_SAVE);
+    app_calibration_process(&calibration_app);
+  }
+
+  if (mag_status == LIS3MDL_OK)
+  {
+    App_CalibrateMagnetometerBlocking();
+  }
+#endif
+
+  app_calibration_apply_stored(&calibration_app);
+}
+
+static void App_SensorsReadAndCompensate(void)
+{
+  if (imu_status == MPU6500_OK)
+  {
+    imu_read_status = mpu6500_read_raw(&imu, &imu_raw_sample);
+    if (imu_read_status == MPU6500_OK)
+    {
+      sensor_cal_apply_mpu6500_accel_raw(&calibration_app.block.mpu6500,
+                                         &imu_raw_sample.accel,
+                                         &accel_compensated_raw);
+      sensor_cal_apply_mpu6500_gyro_raw(&calibration_app.block.mpu6500,
+                                        &imu_raw_sample.gyro,
+                                        &gyro_compensated_raw);
+    }
+  }
+
+  if (mag_status == LIS3MDL_OK)
+  {
+    mag_read_status = lis3mdl_read_gauss(&mag, &mag_raw_gauss);
+    if (mag_read_status == LIS3MDL_OK)
+    {
+      sensor_cal_apply_lis3mdl_gauss(&calibration_app.block.lis3mdl,
+                                     &mag_raw_gauss,
+                                     &mag_compensated_gauss);
+    }
+  }
+
+  if (prs_status == DPS310_OK)
+  {
+    prs_read_status = dps310_read_compensated(&prs,
+                                             &prs_calibration,
+                                             DPS310_OVERSAMPLING_1,
+                                             DPS310_OVERSAMPLING_1,
+                                             &prs_compensated_sample);
+  }
+}
+
+static void App_OrientationUpdateMadgwick(void)
+{
+  float accel_g_x;
+  float accel_g_y;
+  float accel_g_z;
+  float gyro_rad_s_x;
+  float gyro_rad_s_y;
+  float gyro_rad_s_z;
+
+  if ((imu_status != MPU6500_OK) || (imu_read_status != MPU6500_OK))
+  {
+    return;
+  }
+
+  accel_g_x = accel_compensated_raw.x / imu.accel_lsb_per_g;
+  accel_g_y = accel_compensated_raw.y / imu.accel_lsb_per_g;
+  accel_g_z = accel_compensated_raw.z / imu.accel_lsb_per_g;
+
+  gyro_rad_s_x = (gyro_compensated_raw.x / imu.gyro_lsb_per_dps) * APP_DEG_TO_RAD;
+  gyro_rad_s_y = (gyro_compensated_raw.y / imu.gyro_lsb_per_dps) * APP_DEG_TO_RAD;
+  gyro_rad_s_z = (gyro_compensated_raw.z / imu.gyro_lsb_per_dps) * APP_DEG_TO_RAD;
+
+  imu_filter(accel_g_x,
+             accel_g_y,
+             accel_g_z,
+             gyro_rad_s_x,
+             gyro_rad_s_y,
+             gyro_rad_s_z);
+
+  eulerAngles(q_est,
+              &telemetry_sample.euler.roll_deg,
+              &telemetry_sample.euler.pitch_deg,
+              &telemetry_sample.euler.yaw_deg);
+}
+
+static void App_TelemetryUpdateSample(uint64_t timestamp_us)
+{
+  telemetry_sample.timestamp_us = timestamp_us;
+
+  if ((imu_status == MPU6500_OK) && (imu_read_status == MPU6500_OK))
+  {
+    telemetry_sample.accel_mps2.x = (accel_compensated_raw.x / imu.accel_lsb_per_g) * APP_STANDARD_GRAVITY_MPS2;
+    telemetry_sample.accel_mps2.y = (accel_compensated_raw.y / imu.accel_lsb_per_g) * APP_STANDARD_GRAVITY_MPS2;
+    telemetry_sample.accel_mps2.z = (accel_compensated_raw.z / imu.accel_lsb_per_g) * APP_STANDARD_GRAVITY_MPS2;
+
+    telemetry_sample.gyro_dps.x = gyro_compensated_raw.x / imu.gyro_lsb_per_dps;
+    telemetry_sample.gyro_dps.y = gyro_compensated_raw.y / imu.gyro_lsb_per_dps;
+    telemetry_sample.gyro_dps.z = gyro_compensated_raw.z / imu.gyro_lsb_per_dps;
+  }
+
+  if ((mag_status == LIS3MDL_OK) && (mag_read_status == LIS3MDL_OK))
+  {
+    telemetry_sample.mag_uT.x = mag_compensated_gauss.x * APP_GAUSS_TO_MICROTESLA;
+    telemetry_sample.mag_uT.y = mag_compensated_gauss.y * APP_GAUSS_TO_MICROTESLA;
+    telemetry_sample.mag_uT.z = mag_compensated_gauss.z * APP_GAUSS_TO_MICROTESLA;
+  }
+
+  if ((prs_status == DPS310_OK) && (prs_read_status == DPS310_OK))
+  {
+    telemetry_sample.pressure_pa = prs_compensated_sample.pressure_pa;
+    telemetry_sample.temperature_c = prs_compensated_sample.temperature_c;
+  }
+}
+
+static void App_TelemetrySendCdc(void)
+{
+  static char frame[384];
+  int length;
+  uint32_t now_ms = HAL_GetTick();
+  uint32_t timestamp_us_32 = (uint32_t)telemetry_sample.timestamp_us;
+
+  if ((now_ms - telemetry_last_send_ms) < APP_TELEMETRY_PERIOD_MS)
+  {
+    return;
+  }
+  telemetry_last_send_ms = now_ms;
+
+  length = snprintf(frame,
+                    sizeof(frame),
+                    "TUS=%lu,ACC_MPS2_1000=%ld,%ld,%ld,GYRO_MDPS=%ld,%ld,%ld,"
+                    "MAG_UT100=%ld,%ld,%ld,P_PA100=%ld,T_C100=%ld,"
+                    "ROLL_MDEG=%ld,PITCH_MDEG=%ld,YAW_MDEG=%ld\r\n",
+                    (unsigned long)timestamp_us_32,
+                    (long)App_FloatToInt32Scaled(telemetry_sample.accel_mps2.x, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.accel_mps2.y, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.accel_mps2.z, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.gyro_dps.x, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.gyro_dps.y, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.gyro_dps.z, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.mag_uT.x, 100.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.mag_uT.y, 100.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.mag_uT.z, 100.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.pressure_pa, 100.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.temperature_c, 100.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.euler.roll_deg, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.euler.pitch_deg, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.euler.yaw_deg, 1000.0f));
+
+  if ((length > 0) && (length < (int)sizeof(frame)))
+  {
+    (void)CDC_Transmit_FS((uint8_t *)frame, (uint16_t)length);
+  }
+}
+
+static int32_t App_FloatToInt32Scaled(float value, float scale)
+{
+  float scaled = value * scale;
+
+  if (scaled >= 0.0f)
+  {
+    return (int32_t)(scaled + 0.5f);
+  }
+
+  return (int32_t)(scaled - 0.5f);
+}
+
+static uint64_t App_TimestampUs(void)
+{
+  return (uint64_t)HAL_GetTick() * 1000ULL;
+}
+
+#ifdef DO_CALIBRATE_SENSORS
+static void App_LoadUserAccelCalibrationSamples(void)
+{
+  sensor_cal_accel_six_position_t *accel_data = &calibration_app.accel_data;
+
+  sensor_cal_accel_six_position_clear(accel_data);
+
+  accel_data->mean[SENSOR_CAL_ACCEL_POS_X].x = USER_CAL_ACCEL_POS_X_X_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_POS_X].y = USER_CAL_ACCEL_POS_X_Y_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_POS_X].z = USER_CAL_ACCEL_POS_X_Z_RAW;
+  accel_data->valid[SENSOR_CAL_ACCEL_POS_X] = 1U;
+
+  accel_data->mean[SENSOR_CAL_ACCEL_NEG_X].x = USER_CAL_ACCEL_NEG_X_X_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_NEG_X].y = USER_CAL_ACCEL_NEG_X_Y_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_NEG_X].z = USER_CAL_ACCEL_NEG_X_Z_RAW;
+  accel_data->valid[SENSOR_CAL_ACCEL_NEG_X] = 1U;
+
+  accel_data->mean[SENSOR_CAL_ACCEL_POS_Y].x = USER_CAL_ACCEL_POS_Y_X_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_POS_Y].y = USER_CAL_ACCEL_POS_Y_Y_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_POS_Y].z = USER_CAL_ACCEL_POS_Y_Z_RAW;
+  accel_data->valid[SENSOR_CAL_ACCEL_POS_Y] = 1U;
+
+  accel_data->mean[SENSOR_CAL_ACCEL_NEG_Y].x = USER_CAL_ACCEL_NEG_Y_X_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_NEG_Y].y = USER_CAL_ACCEL_NEG_Y_Y_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_NEG_Y].z = USER_CAL_ACCEL_NEG_Y_Z_RAW;
+  accel_data->valid[SENSOR_CAL_ACCEL_NEG_Y] = 1U;
+
+  accel_data->mean[SENSOR_CAL_ACCEL_POS_Z].x = USER_CAL_ACCEL_POS_Z_X_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_POS_Z].y = USER_CAL_ACCEL_POS_Z_Y_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_POS_Z].z = USER_CAL_ACCEL_POS_Z_Z_RAW;
+  accel_data->valid[SENSOR_CAL_ACCEL_POS_Z] = 1U;
+
+  accel_data->mean[SENSOR_CAL_ACCEL_NEG_Z].x = USER_CAL_ACCEL_NEG_Z_X_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_NEG_Z].y = USER_CAL_ACCEL_NEG_Z_Y_RAW;
+  accel_data->mean[SENSOR_CAL_ACCEL_NEG_Z].z = USER_CAL_ACCEL_NEG_Z_Z_RAW;
+  accel_data->valid[SENSOR_CAL_ACCEL_NEG_Z] = 1U;
+}
+
+static void App_CalibrateMagnetometerBlocking(void)
+{
+  uint32_t sample_index;
+  uint32_t sample_count;
+
+  app_calibration_request(&calibration_app, APP_CAL_CMD_MAG_START);
+  app_calibration_process(&calibration_app);
+
+  sample_count = APP_CALIBRATE_MAG_MINMAX_DURATION_MS / APP_MAG_CAL_UPDATE_PERIOD_MS;
+  for (sample_index = 0U; sample_index < sample_count; sample_index++)
+  {
+    app_calibration_update_mag(&calibration_app);
+    HAL_Delay(APP_MAG_CAL_UPDATE_PERIOD_MS);
+  }
+
+  app_calibration_request(&calibration_app, APP_CAL_CMD_MAG_FINISH_SAVE);
+  app_calibration_process(&calibration_app);
+}
+#endif
 
 /* USER CODE END 4 */
 

@@ -36,7 +36,14 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../USB_Device/Target/usbd_conf.h ../Core/Inc/app_calibration.h \
  ../Core/Inc/cal_storage.h ../Core/Inc/dps310.h ../Core/Inc/lis3mdl.h \
  ../Core/Inc/mpu6500.h ../Core/Inc/sensor_calibration.h \
- ../Core/Inc/dps310.h ../Core/Inc/lis3mdl.h ../Core/Inc/mpu6500.h
+ ../Core/Inc/dps310.h ../Core/Inc/lis3mdl.h ../Core/Inc/madgwickFilter.h \
+ ../Core/Inc/mpu6500.h ../USB_Device/App/usbd_cdc_if.h \
+ ../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc/usbd_cdc.h \
+ ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h \
+ ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_def.h \
+ ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_core.h \
+ ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h \
+ ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ctlreq.h
 ../Core/Inc/main.h:
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal.h:
 ../Core/Inc/stm32g4xx_hal_conf.h:
@@ -81,4 +88,12 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Core/Inc/sensor_calibration.h:
 ../Core/Inc/dps310.h:
 ../Core/Inc/lis3mdl.h:
+../Core/Inc/madgwickFilter.h:
 ../Core/Inc/mpu6500.h:
+../USB_Device/App/usbd_cdc_if.h:
+../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc/usbd_cdc.h:
+../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h:
+../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_def.h:
+../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_core.h:
+../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h:
+../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ctlreq.h:
