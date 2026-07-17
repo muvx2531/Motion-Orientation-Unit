@@ -99,7 +99,10 @@ static inline void printQuaternion (struct quaternion q){
 // IMU consists of a Gyroscope plus Accelerometer sensor fusion
 void imu_filter(float ax, float ay, float az, float gx, float gy, float gz);
 
-// void marg_filter(void); for future
+// MARG consists of Gyroscope, Accelerometer, and Magnetometer sensor fusion
+void marg_filter(float ax, float ay, float az,
+                 float gx, float gy, float gz,
+                 float mx, float my, float mz);
 
 
 void eulerAngles(struct quaternion q, float* roll, float* pitch, float* yaw);

@@ -118,6 +118,8 @@ UART_HandleTypeDef huart2;
 
 SPI_HandleTypeDef hspi1;
 
+TIM_HandleTypeDef htim2;
+
 /* USER CODE BEGIN PV */
 static mpu6500_t imu;
 static lis3mdl_t mag;
@@ -158,6 +160,7 @@ static void MX_GPIO_Init(void);
 static void MX_LPUART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 static void App_SensorsInit(void);
 static void App_SensorsCalibrationSection(void);
@@ -211,7 +214,13 @@ int main(void)
   MX_USART2_UART_Init();
   MX_SPI1_Init();
   MX_USB_Device_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  if (HAL_TIM_Base_Start(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   App_SensorsInit();
   App_SensorsCalibrationSection();
 
@@ -417,6 +426,51 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 95;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 0xFFFFFFFFUL;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -431,36 +485,36 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, SPI_MAG_CS_Pin|SPI_PRS_CS_Pin|SPI_IMU_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_4|GPIO_PIN_6, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, IMU_FSync_Pin|LED_Blink_Pin|GPS_PowerON_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PF0 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  /*Configure GPIO pin : MAG_INT_Pin */
+  GPIO_InitStruct.Pin = MAG_INT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+  HAL_GPIO_Init(MAG_INT_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PA0 PA1 PA4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_4;
+  /*Configure GPIO pins : SPI_MAG_CS_Pin SPI_PRS_CS_Pin SPI_IMU_CS_Pin */
+  GPIO_InitStruct.Pin = SPI_MAG_CS_Pin|SPI_PRS_CS_Pin|SPI_IMU_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB0 PB4 PB6 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_4|GPIO_PIN_6;
+  /*Configure GPIO pins : IMU_FSync_Pin LED_Blink_Pin GPS_PowerON_Pin */
+  GPIO_InitStruct.Pin = IMU_FSync_Pin|LED_Blink_Pin|GPS_PowerON_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PA10 */
-  GPIO_InitStruct.Pin = GPIO_PIN_10;
+  /*Configure GPIO pin : IMU_INT_Pin */
+  GPIO_InitStruct.Pin = IMU_INT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_Init(IMU_INT_GPIO_Port, &GPIO_InitStruct);
 
 }
 
@@ -586,12 +640,27 @@ static void App_OrientationUpdateMadgwick(void)
   gyro_rad_s_y = (gyro_compensated_raw.y / imu.gyro_lsb_per_dps) * APP_DEG_TO_RAD;
   gyro_rad_s_z = (gyro_compensated_raw.z / imu.gyro_lsb_per_dps) * APP_DEG_TO_RAD;
 
-  imu_filter(accel_g_x,
-             accel_g_y,
-             accel_g_z,
-             gyro_rad_s_x,
-             gyro_rad_s_y,
-             gyro_rad_s_z);
+  if ((mag_status == LIS3MDL_OK) && (mag_read_status == LIS3MDL_OK))
+  {
+    marg_filter(accel_g_x,
+                accel_g_y,
+                accel_g_z,
+                gyro_rad_s_x,
+                gyro_rad_s_y,
+                gyro_rad_s_z,
+                mag_compensated_gauss.x,
+                mag_compensated_gauss.y,
+                mag_compensated_gauss.z);
+  }
+  else
+  {
+    imu_filter(accel_g_x,
+               accel_g_y,
+               accel_g_z,
+               gyro_rad_s_x,
+               gyro_rad_s_y,
+               gyro_rad_s_z);
+  }
 
   eulerAngles(q_est,
               &telemetry_sample.euler.roll_deg,
@@ -682,7 +751,7 @@ static int32_t App_FloatToInt32Scaled(float value, float scale)
 
 static uint64_t App_TimestampUs(void)
 {
-  return (uint64_t)HAL_GetTick() * 1000ULL;
+  return (uint64_t)__HAL_TIM_GET_COUNTER(&htim2);
 }
 
 #ifdef DO_CALIBRATE_SENSORS

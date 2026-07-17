@@ -118,6 +118,122 @@ void imu_filter(float ax, float ay, float az, float gx, float gy, float gz){
    
 }
 
+// Gyroscope is in radians per second. Accelerometer and magnetometer are normalized internally.
+void marg_filter(float ax, float ay, float az,
+                 float gx, float gy, float gz,
+                 float mx, float my, float mz)
+{
+    float recipNorm;
+    float s0, s1, s2, s3;
+    float qDot0, qDot1, qDot2, qDot3;
+    float hx, hy;
+    float _2q0mx, _2q0my, _2q0mz, _2q1mx;
+    float _2q0 = 2.0f * q_est.q1;
+    float _2q1 = 2.0f * q_est.q2;
+    float _2q2 = 2.0f * q_est.q3;
+    float _2q3 = 2.0f * q_est.q4;
+    float q0q0 = q_est.q1 * q_est.q1;
+    float q0q1 = q_est.q1 * q_est.q2;
+    float q0q2 = q_est.q1 * q_est.q3;
+    float q0q3 = q_est.q1 * q_est.q4;
+    float q1q1 = q_est.q2 * q_est.q2;
+    float q1q2 = q_est.q2 * q_est.q3;
+    float q1q3 = q_est.q2 * q_est.q4;
+    float q2q2 = q_est.q3 * q_est.q3;
+    float q2q3 = q_est.q3 * q_est.q4;
+    float q3q3 = q_est.q4 * q_est.q4;
+    float _2bx;
+    float _2bz;
+    float _4bx;
+    float _4bz;
+
+    if ((mx == 0.0f) && (my == 0.0f) && (mz == 0.0f))
+    {
+        imu_filter(ax, ay, az, gx, gy, gz);
+        return;
+    }
+
+    if ((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))
+    {
+        return;
+    }
+
+    qDot0 = 0.5f * (-q_est.q2 * gx - q_est.q3 * gy - q_est.q4 * gz);
+    qDot1 = 0.5f * ( q_est.q1 * gx + q_est.q3 * gz - q_est.q4 * gy);
+    qDot2 = 0.5f * ( q_est.q1 * gy - q_est.q2 * gz + q_est.q4 * gx);
+    qDot3 = 0.5f * ( q_est.q1 * gz + q_est.q2 * gy - q_est.q3 * gx);
+
+    recipNorm = 1.0f / sqrtf((ax * ax) + (ay * ay) + (az * az));
+    ax *= recipNorm;
+    ay *= recipNorm;
+    az *= recipNorm;
+
+    recipNorm = 1.0f / sqrtf((mx * mx) + (my * my) + (mz * mz));
+    mx *= recipNorm;
+    my *= recipNorm;
+    mz *= recipNorm;
+
+    _2q0mx = 2.0f * q_est.q1 * mx;
+    _2q0my = 2.0f * q_est.q1 * my;
+    _2q0mz = 2.0f * q_est.q1 * mz;
+    _2q1mx = 2.0f * q_est.q2 * mx;
+
+    hx = (mx * q0q0) - (_2q0my * q_est.q4) + (_2q0mz * q_est.q3) + (mx * q1q1)
+       + (_2q1 * my * q_est.q3) + (_2q1 * mz * q_est.q4) - (mx * q2q2) - (mx * q3q3);
+    hy = (_2q0mx * q_est.q4) + (my * q0q0) - (_2q0mz * q_est.q2) + (_2q1mx * q_est.q3)
+       - (my * q1q1) + (my * q2q2) + (_2q2 * mz * q_est.q4) - (my * q3q3);
+    _2bx = sqrtf((hx * hx) + (hy * hy));
+    _2bz = -(_2q0mx * q_est.q3) + (_2q0my * q_est.q2) + (mz * q0q0) + (_2q1mx * q_est.q4)
+          - (mz * q1q1) + (_2q2 * my * q_est.q4) - (mz * q2q2) + (mz * q3q3);
+    _4bx = 2.0f * _2bx;
+    _4bz = 2.0f * _2bz;
+
+    s0 = (-_2q2 * ((2.0f * (q1q3 - q0q2)) - ax))
+       + (_2q1 * ((2.0f * (q0q1 + q2q3)) - ay))
+       - (_2bz * q_est.q3 * ((_2bx * (0.5f - q2q2 - q3q3)) + (_2bz * (q1q3 - q0q2)) - mx))
+       + (((-_2bx * q_est.q4) + (_2bz * q_est.q2)) * ((_2bx * (q1q2 - q0q3)) + (_2bz * (q0q1 + q2q3)) - my))
+       + (_2bx * q_est.q3 * ((_2bx * (q0q2 + q1q3)) + (_2bz * (0.5f - q1q1 - q2q2)) - mz));
+    s1 = (_2q3 * ((2.0f * (q1q3 - q0q2)) - ax))
+       + (_2q0 * ((2.0f * (q0q1 + q2q3)) - ay))
+       - (4.0f * q_est.q2 * ((2.0f * (0.5f - q1q1 - q2q2)) - az))
+       + (_2bz * q_est.q4 * ((_2bx * (0.5f - q2q2 - q3q3)) + (_2bz * (q1q3 - q0q2)) - mx))
+       + (((_2bx * q_est.q3) + (_2bz * q_est.q1)) * ((_2bx * (q1q2 - q0q3)) + (_2bz * (q0q1 + q2q3)) - my))
+       + (((_2bx * q_est.q4) - (_4bz * q_est.q2)) * ((_2bx * (q0q2 + q1q3)) + (_2bz * (0.5f - q1q1 - q2q2)) - mz));
+    s2 = (-_2q0 * ((2.0f * (q1q3 - q0q2)) - ax))
+       + (_2q3 * ((2.0f * (q0q1 + q2q3)) - ay))
+       - (4.0f * q_est.q3 * ((2.0f * (0.5f - q1q1 - q2q2)) - az))
+       + (((-_4bx * q_est.q3) - (_2bz * q_est.q1)) * ((_2bx * (0.5f - q2q2 - q3q3)) + (_2bz * (q1q3 - q0q2)) - mx))
+       + (((_2bx * q_est.q2) + (_2bz * q_est.q4)) * ((_2bx * (q1q2 - q0q3)) + (_2bz * (q0q1 + q2q3)) - my))
+       + (((_2bx * q_est.q1) - (_4bz * q_est.q3)) * ((_2bx * (q0q2 + q1q3)) + (_2bz * (0.5f - q1q1 - q2q2)) - mz));
+    s3 = (_2q1 * ((2.0f * (q1q3 - q0q2)) - ax))
+       + (_2q2 * ((2.0f * (q0q1 + q2q3)) - ay))
+       + (((-_4bx * q_est.q4) + (_2bz * q_est.q2)) * ((_2bx * (0.5f - q2q2 - q3q3)) + (_2bz * (q1q3 - q0q2)) - mx))
+       + (((-_2bx * q_est.q1) + (_2bz * q_est.q3)) * ((_2bx * (q1q2 - q0q3)) + (_2bz * (q0q1 + q2q3)) - my))
+       + (_2bx * q_est.q2 * ((_2bx * (q0q2 + q1q3)) + (_2bz * (0.5f - q1q1 - q2q2)) - mz));
+
+    recipNorm = sqrtf((s0 * s0) + (s1 * s1) + (s2 * s2) + (s3 * s3));
+    if (recipNorm == 0.0f)
+    {
+        return;
+    }
+    recipNorm = 1.0f / recipNorm;
+    s0 *= recipNorm;
+    s1 *= recipNorm;
+    s2 *= recipNorm;
+    s3 *= recipNorm;
+
+    qDot0 -= BETA * s0;
+    qDot1 -= BETA * s1;
+    qDot2 -= BETA * s2;
+    qDot3 -= BETA * s3;
+
+    q_est.q1 += qDot0 * DELTA_T;
+    q_est.q2 += qDot1 * DELTA_T;
+    q_est.q3 += qDot2 * DELTA_T;
+    q_est.q4 += qDot3 * DELTA_T;
+    quat_Normalization(&q_est);
+}
+
 /*
  returns as pointers, roll pitch and yaw from the quaternion generated in imu_filter
  Assume right hand system
@@ -136,5 +252,3 @@ void eulerAngles(struct quaternion q, float* roll, float* pitch, float* yaw){
     *roll *= (180.0f / PI);
 
 }
-
-
