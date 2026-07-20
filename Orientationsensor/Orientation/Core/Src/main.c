@@ -28,6 +28,8 @@
 #include "madgwickFilter.h"
 #include "mpu6500.h"
 #include "usbd_cdc_if.h"
+#include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 
 /* USER CODE END Includes */
@@ -69,6 +71,14 @@ typedef struct
  */
 //#define DO_CALIBRATE_SENSORS
 
+/*
+ * Manual calibration modes. Enable only one sensor at a time.
+ * Calibration mode prints to USB CDC and stops normal telemetry.
+ */
+//#define CAL_GYRO_ENABLE
+//#define CAL_ACCEL_ENABLE
+//#define CAL_MAG_ENABLE
+
 #ifdef DO_CALIBRATE_SENSORS
 #define APP_CALIBRATE_MAG_MINMAX_DURATION_MS  30000U
 #define APP_CALIBRATE_LOAD_DEFAULTS_FIRST     0U
@@ -101,9 +111,61 @@ typedef struct
 
 #define APP_SENSOR_READ_PERIOD_MS             10U
 #define APP_TELEMETRY_PERIOD_MS               100U
+#define APP_CDC_PRINT_RETRY_COUNT             20U
+#define APP_CDC_PRINT_RETRY_DELAY_MS          2U
 #define APP_STANDARD_GRAVITY_MPS2             9.80665f
 #define APP_GAUSS_TO_MICROTESLA               100.0f
 #define APP_DEG_TO_RAD                        0.017453292519943295f
+
+#if defined(CAL_GYRO_ENABLE) || defined(CAL_ACCEL_ENABLE) || defined(CAL_MAG_ENABLE)
+#define APP_CAL_MODE_ACTIVE                   1U
+#else
+#define APP_CAL_MODE_ACTIVE                   0U
+#endif
+
+#if (defined(CAL_GYRO_ENABLE) && defined(CAL_ACCEL_ENABLE)) || \
+    (defined(CAL_GYRO_ENABLE) && defined(CAL_MAG_ENABLE)) || \
+    (defined(CAL_ACCEL_ENABLE) && defined(CAL_MAG_ENABLE))
+#error "Enable only one manual calibration mode at a time."
+#endif
+
+#ifdef CAL_GYRO_ENABLE
+#define APP_GYRO_CAL_WARMUP_MS                10000U
+#define APP_GYRO_CAL_SAMPLE_COUNT             2000U
+#define APP_GYRO_CAL_SAMPLE_DELAY_MS          10U
+#define APP_GYRO_CAL_PRINT_PERIOD             100U
+#define APP_GYRO_CAL_VERIFY_SAMPLE_COUNT      500U
+#define APP_GYRO_CAL_VERIFY_DELAY_MS          10U
+#define APP_GYRO_CAL_MAX_STDDEV_MDPS          80.0f
+#define APP_GYRO_CAL_MAX_RANGE_MDPS           500.0f
+#define APP_GYRO_CAL_MAX_VERIFY_MEAN_MDPS     50.0f
+#define APP_GYRO_CAL_MAX_ACCEL_RANGE_RAW      400.0f
+#endif
+
+#ifdef CAL_ACCEL_ENABLE
+#define APP_ACCEL_CAL_MOVE_TIME_MS            10000U
+#define APP_ACCEL_CAL_SETTLE_TIME_MS          3000U
+#define APP_ACCEL_CAL_SAMPLE_COUNT            500U
+#define APP_ACCEL_CAL_SAMPLE_DELAY_MS         10U
+#define APP_ACCEL_CAL_PRINT_PERIOD            100U
+#define APP_ACCEL_CAL_MAX_RANGE_RAW           300.0f
+#define APP_ACCEL_CAL_MAX_GRAVITY_ERROR_RAW   900.0f
+#define APP_ACCEL_CAL_MIN_DOMINANT_RAW_SCALE  0.70f
+#define APP_ACCEL_CAL_MAX_CROSS_RAW_SCALE     0.45f
+#define APP_ACCEL_CAL_MAX_GYRO_MEAN_MDPS      200.0f
+#endif
+
+#ifdef CAL_MAG_ENABLE
+#define APP_MAG_CAL_DURATION_MS               60000U
+#define APP_MAG_CAL_SAMPLE_DELAY_MS           20U
+#define APP_MAG_CAL_PRINT_PERIOD              50U
+#define APP_MAG_CAL_ACTION_PERIOD_MS          10000U
+#define APP_MAG_CAL_MIN_SAMPLE_COUNT          2000U
+#define APP_MAG_CAL_MIN_RANGE_GAUSS           0.25f
+#define APP_MAG_CAL_MAX_RANGE_RATIO           2.50f
+#define APP_MAG_CAL_MIN_FIELD_UT              25.0f
+#define APP_MAG_CAL_MAX_FIELD_UT              75.0f
+#endif
 
 /* USER CODE END PD */
 
@@ -136,6 +198,7 @@ static lis3mdl_calibration_t mag_calibration;
 static dps310_calibration_t prs_calibration;
 static app_calibration_t calibration_app;
 
+#if (APP_CAL_MODE_ACTIVE == 0U)
 static mpu6500_raw_sample_t imu_raw_sample;
 static sensor_cal_vector_t accel_compensated_raw;
 static sensor_cal_vector_t gyro_compensated_raw;
@@ -144,6 +207,7 @@ static lis3mdl_vector_t mag_compensated_gauss;
 static dps310_sample_t prs_compensated_sample;
 static telemetry_sample_t telemetry_sample;
 static uint32_t telemetry_last_send_ms = 0U;
+#endif
 
 volatile mpu6500_status_t imu_status = MPU6500_ERROR;
 volatile lis3mdl_status_t mag_status = LIS3MDL_ERROR;
@@ -164,15 +228,34 @@ static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 static void App_SensorsInit(void);
 static void App_SensorsCalibrationSection(void);
+#if (APP_CAL_MODE_ACTIVE == 0U)
 static void App_SensorsReadAndCompensate(void);
 static void App_OrientationUpdateMadgwick(void);
 static void App_TelemetryUpdateSample(uint64_t timestamp_us);
 static void App_TelemetrySendCdc(void);
+#endif
 static int32_t App_FloatToInt32Scaled(float value, float scale);
 static uint64_t App_TimestampUs(void);
+#if (APP_CAL_MODE_ACTIVE != 0U)
+static void App_CdcPrint(const char *format, ...);
+#endif
 #ifdef DO_CALIBRATE_SENSORS
 static void App_LoadUserAccelCalibrationSamples(void);
 static void App_CalibrateMagnetometerBlocking(void);
+#endif
+#ifdef CAL_GYRO_ENABLE
+static void App_CalibrateGyroManualBlocking(void);
+#endif
+#ifdef CAL_ACCEL_ENABLE
+static void App_CalibrateAccelManualBlocking(void);
+static sensor_cal_status_t App_AccelCalCollectFace(sensor_cal_accel_position_t position,
+                                                   const char *label,
+                                                   uint8_t dominant_axis,
+                                                   float expected_sign);
+#endif
+#ifdef CAL_MAG_ENABLE
+static void App_CalibrateMagManualBlocking(void);
+static const char *App_MagCalActionText(uint32_t elapsed_ms);
 #endif
 
 /* USER CODE END PFP */
@@ -223,6 +306,15 @@ int main(void)
 
   App_SensorsInit();
   App_SensorsCalibrationSection();
+#ifdef CAL_GYRO_ENABLE
+  App_CalibrateGyroManualBlocking();
+#endif
+#ifdef CAL_ACCEL_ENABLE
+  App_CalibrateAccelManualBlocking();
+#endif
+#ifdef CAL_MAG_ENABLE
+  App_CalibrateMagManualBlocking();
+#endif
 
   /* USER CODE END 2 */
 
@@ -235,10 +327,14 @@ int main(void)
     /* USER CODE BEGIN 3 */
     uint64_t timestamp_us = App_TimestampUs();
 
+#if (APP_CAL_MODE_ACTIVE == 0U)
     App_SensorsReadAndCompensate();
     App_OrientationUpdateMadgwick();
     App_TelemetryUpdateSample(timestamp_us);
     App_TelemetrySendCdc();
+#else
+    (void)timestamp_us;
+#endif
     HAL_Delay(APP_SENSOR_READ_PERIOD_MS);
   }
   /* USER CODE END 3 */
@@ -581,6 +677,7 @@ static void App_SensorsCalibrationSection(void)
   app_calibration_apply_stored(&calibration_app);
 }
 
+#if (APP_CAL_MODE_ACTIVE == 0U)
 static void App_SensorsReadAndCompensate(void)
 {
   if (imu_status == MPU6500_OK)
@@ -736,6 +833,7 @@ static void App_TelemetrySendCdc(void)
     (void)CDC_Transmit_FS((uint8_t *)frame, (uint16_t)length);
   }
 }
+#endif
 
 static int32_t App_FloatToInt32Scaled(float value, float scale)
 {
@@ -753,6 +851,34 @@ static uint64_t App_TimestampUs(void)
 {
   return (uint64_t)__HAL_TIM_GET_COUNTER(&htim2);
 }
+
+#if (APP_CAL_MODE_ACTIVE != 0U)
+static void App_CdcPrint(const char *format, ...)
+{
+  static char text[192];
+  va_list args;
+  int length;
+  uint32_t retry;
+
+  va_start(args, format);
+  length = vsnprintf(text, sizeof(text), format, args);
+  va_end(args);
+
+  if ((length <= 0) || (length >= (int)sizeof(text)))
+  {
+    return;
+  }
+
+  for (retry = 0U; retry < APP_CDC_PRINT_RETRY_COUNT; retry++)
+  {
+    if (CDC_Transmit_FS((uint8_t *)text, (uint16_t)length) == USBD_OK)
+    {
+      return;
+    }
+    HAL_Delay(APP_CDC_PRINT_RETRY_DELAY_MS);
+  }
+}
+#endif
 
 #ifdef DO_CALIBRATE_SENSORS
 static void App_LoadUserAccelCalibrationSamples(void)
@@ -809,6 +935,725 @@ static void App_CalibrateMagnetometerBlocking(void)
 
   app_calibration_request(&calibration_app, APP_CAL_CMD_MAG_FINISH_SAVE);
   app_calibration_process(&calibration_app);
+}
+#endif
+
+#ifdef CAL_GYRO_ENABLE
+static void App_CalibrateGyroManualBlocking(void)
+{
+  uint32_t i;
+  uint32_t warmup_steps;
+  mpu6500_raw_sample_t sample;
+  float sum_x = 0.0f;
+  float sum_y = 0.0f;
+  float sum_z = 0.0f;
+  float sum_sq_x = 0.0f;
+  float sum_sq_y = 0.0f;
+  float sum_sq_z = 0.0f;
+  float mean_x;
+  float mean_y;
+  float mean_z;
+  float std_x;
+  float std_y;
+  float std_z;
+  float min_x = 0.0f;
+  float min_y = 0.0f;
+  float min_z = 0.0f;
+  float max_x = 0.0f;
+  float max_y = 0.0f;
+  float max_z = 0.0f;
+  float accel_min_x = 0.0f;
+  float accel_min_y = 0.0f;
+  float accel_min_z = 0.0f;
+  float accel_max_x = 0.0f;
+  float accel_max_y = 0.0f;
+  float accel_max_z = 0.0f;
+  float verify_sum_x = 0.0f;
+  float verify_sum_y = 0.0f;
+  float verify_sum_z = 0.0f;
+  float verify_mean_mdps_x;
+  float verify_mean_mdps_y;
+  float verify_mean_mdps_z;
+  uint8_t pass = 1U;
+
+  App_CdcPrint("\r\nGYRO_CAL: START\r\n");
+  App_CdcPrint("GYRO_CAL: PLACE_BOARD_STILL\r\n");
+
+  if (imu_status != MPU6500_OK)
+  {
+    App_CdcPrint("GYRO_CAL: FAIL IMU_NOT_READY status=%ld\r\n", (long)imu_status);
+    return;
+  }
+
+  warmup_steps = APP_GYRO_CAL_WARMUP_MS / 100U;
+  App_CdcPrint("GYRO_CAL: WARMUP_MS=%lu\r\n", (unsigned long)APP_GYRO_CAL_WARMUP_MS);
+  for (i = 0U; i < warmup_steps; i++)
+  {
+    if (mpu6500_read_raw(&imu, &sample) != MPU6500_OK)
+    {
+      App_CdcPrint("GYRO_CAL: FAIL WARMUP_READ_ERROR\r\n");
+      return;
+    }
+
+    App_CdcPrint("GYRO_RAW: X=%ld,Y=%ld,Z=%ld,ACC=%ld,%ld,%ld\r\n",
+                 (long)sample.gyro.x,
+                 (long)sample.gyro.y,
+                 (long)sample.gyro.z,
+                 (long)sample.accel.x,
+                 (long)sample.accel.y,
+                 (long)sample.accel.z);
+    HAL_Delay(100U);
+  }
+
+  App_CdcPrint("GYRO_CAL: COLLECT samples=%lu delay_ms=%lu\r\n",
+               (unsigned long)APP_GYRO_CAL_SAMPLE_COUNT,
+               (unsigned long)APP_GYRO_CAL_SAMPLE_DELAY_MS);
+
+  for (i = 0U; i < APP_GYRO_CAL_SAMPLE_COUNT; i++)
+  {
+    float gx;
+    float gy;
+    float gz;
+    float ax;
+    float ay;
+    float az;
+
+    if (mpu6500_read_raw(&imu, &sample) != MPU6500_OK)
+    {
+      App_CdcPrint("GYRO_CAL: FAIL COLLECT_READ_ERROR sample=%lu\r\n", (unsigned long)i);
+      return;
+    }
+
+    gx = (float)sample.gyro.x;
+    gy = (float)sample.gyro.y;
+    gz = (float)sample.gyro.z;
+    ax = (float)sample.accel.x;
+    ay = (float)sample.accel.y;
+    az = (float)sample.accel.z;
+
+    if (i == 0U)
+    {
+      min_x = max_x = gx;
+      min_y = max_y = gy;
+      min_z = max_z = gz;
+      accel_min_x = accel_max_x = ax;
+      accel_min_y = accel_max_y = ay;
+      accel_min_z = accel_max_z = az;
+    }
+
+    if (gx < min_x) { min_x = gx; }
+    if (gy < min_y) { min_y = gy; }
+    if (gz < min_z) { min_z = gz; }
+    if (gx > max_x) { max_x = gx; }
+    if (gy > max_y) { max_y = gy; }
+    if (gz > max_z) { max_z = gz; }
+
+    if (ax < accel_min_x) { accel_min_x = ax; }
+    if (ay < accel_min_y) { accel_min_y = ay; }
+    if (az < accel_min_z) { accel_min_z = az; }
+    if (ax > accel_max_x) { accel_max_x = ax; }
+    if (ay > accel_max_y) { accel_max_y = ay; }
+    if (az > accel_max_z) { accel_max_z = az; }
+
+    sum_x += gx;
+    sum_y += gy;
+    sum_z += gz;
+    sum_sq_x += gx * gx;
+    sum_sq_y += gy * gy;
+    sum_sq_z += gz * gz;
+
+    if ((i % APP_GYRO_CAL_PRINT_PERIOD) == 0U)
+    {
+      App_CdcPrint("GYRO_RAW: sample=%lu,X=%ld,Y=%ld,Z=%ld,ACC=%ld,%ld,%ld\r\n",
+                   (unsigned long)i,
+                   (long)sample.gyro.x,
+                   (long)sample.gyro.y,
+                   (long)sample.gyro.z,
+                   (long)sample.accel.x,
+                   (long)sample.accel.y,
+                   (long)sample.accel.z);
+    }
+
+    HAL_Delay(APP_GYRO_CAL_SAMPLE_DELAY_MS);
+  }
+
+  mean_x = sum_x / (float)APP_GYRO_CAL_SAMPLE_COUNT;
+  mean_y = sum_y / (float)APP_GYRO_CAL_SAMPLE_COUNT;
+  mean_z = sum_z / (float)APP_GYRO_CAL_SAMPLE_COUNT;
+  std_x = sqrtf((sum_sq_x / (float)APP_GYRO_CAL_SAMPLE_COUNT) - (mean_x * mean_x));
+  std_y = sqrtf((sum_sq_y / (float)APP_GYRO_CAL_SAMPLE_COUNT) - (mean_y * mean_y));
+  std_z = sqrtf((sum_sq_z / (float)APP_GYRO_CAL_SAMPLE_COUNT) - (mean_z * mean_z));
+
+  App_CdcPrint("GYRO_CAL: OFFSET_RAW_X1000=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(mean_x, 1000.0f),
+               (long)App_FloatToInt32Scaled(mean_y, 1000.0f),
+               (long)App_FloatToInt32Scaled(mean_z, 1000.0f));
+  App_CdcPrint("GYRO_CAL: STD_MDPS=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled((std_x / imu.gyro_lsb_per_dps), 1000.0f),
+               (long)App_FloatToInt32Scaled((std_y / imu.gyro_lsb_per_dps), 1000.0f),
+               (long)App_FloatToInt32Scaled((std_z / imu.gyro_lsb_per_dps), 1000.0f));
+  App_CdcPrint("GYRO_CAL: RANGE_MDPS=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(((max_x - min_x) / imu.gyro_lsb_per_dps), 1000.0f),
+               (long)App_FloatToInt32Scaled(((max_y - min_y) / imu.gyro_lsb_per_dps), 1000.0f),
+               (long)App_FloatToInt32Scaled(((max_z - min_z) / imu.gyro_lsb_per_dps), 1000.0f));
+  App_CdcPrint("GYRO_CAL: ACC_RANGE_RAW=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(accel_max_x - accel_min_x, 1.0f),
+               (long)App_FloatToInt32Scaled(accel_max_y - accel_min_y, 1.0f),
+               (long)App_FloatToInt32Scaled(accel_max_z - accel_min_z, 1.0f));
+
+  if (((std_x / imu.gyro_lsb_per_dps) * 1000.0f) > APP_GYRO_CAL_MAX_STDDEV_MDPS) { pass = 0U; }
+  if (((std_y / imu.gyro_lsb_per_dps) * 1000.0f) > APP_GYRO_CAL_MAX_STDDEV_MDPS) { pass = 0U; }
+  if (((std_z / imu.gyro_lsb_per_dps) * 1000.0f) > APP_GYRO_CAL_MAX_STDDEV_MDPS) { pass = 0U; }
+  if ((((max_x - min_x) / imu.gyro_lsb_per_dps) * 1000.0f) > APP_GYRO_CAL_MAX_RANGE_MDPS) { pass = 0U; }
+  if ((((max_y - min_y) / imu.gyro_lsb_per_dps) * 1000.0f) > APP_GYRO_CAL_MAX_RANGE_MDPS) { pass = 0U; }
+  if ((((max_z - min_z) / imu.gyro_lsb_per_dps) * 1000.0f) > APP_GYRO_CAL_MAX_RANGE_MDPS) { pass = 0U; }
+  if ((accel_max_x - accel_min_x) > APP_GYRO_CAL_MAX_ACCEL_RANGE_RAW) { pass = 0U; }
+  if ((accel_max_y - accel_min_y) > APP_GYRO_CAL_MAX_ACCEL_RANGE_RAW) { pass = 0U; }
+  if ((accel_max_z - accel_min_z) > APP_GYRO_CAL_MAX_ACCEL_RANGE_RAW) { pass = 0U; }
+
+  if (pass == 0U)
+  {
+    App_CdcPrint("GYRO_CAL: FAIL MOVEMENT_OR_NOISE_TOO_HIGH\r\n");
+    return;
+  }
+
+  calibration_app.block.mpu6500.gyro_offset_raw[0] = mean_x;
+  calibration_app.block.mpu6500.gyro_offset_raw[1] = mean_y;
+  calibration_app.block.mpu6500.gyro_offset_raw[2] = mean_z;
+  app_calibration_apply_stored(&calibration_app);
+
+  App_CdcPrint("GYRO_CAL: VERIFY samples=%lu\r\n",
+               (unsigned long)APP_GYRO_CAL_VERIFY_SAMPLE_COUNT);
+  for (i = 0U; i < APP_GYRO_CAL_VERIFY_SAMPLE_COUNT; i++)
+  {
+    sensor_cal_vector_t corrected;
+
+    if (mpu6500_read_raw(&imu, &sample) != MPU6500_OK)
+    {
+      App_CdcPrint("GYRO_CAL: FAIL VERIFY_READ_ERROR sample=%lu\r\n", (unsigned long)i);
+      return;
+    }
+
+    sensor_cal_apply_mpu6500_gyro_raw(&calibration_app.block.mpu6500, &sample.gyro, &corrected);
+    verify_sum_x += corrected.x / imu.gyro_lsb_per_dps;
+    verify_sum_y += corrected.y / imu.gyro_lsb_per_dps;
+    verify_sum_z += corrected.z / imu.gyro_lsb_per_dps;
+
+    if ((i % APP_GYRO_CAL_PRINT_PERIOD) == 0U)
+    {
+      App_CdcPrint("GYRO_VERIFY_MDPS: sample=%lu,X=%ld,Y=%ld,Z=%ld\r\n",
+                   (unsigned long)i,
+                   (long)App_FloatToInt32Scaled(corrected.x / imu.gyro_lsb_per_dps, 1000.0f),
+                   (long)App_FloatToInt32Scaled(corrected.y / imu.gyro_lsb_per_dps, 1000.0f),
+                   (long)App_FloatToInt32Scaled(corrected.z / imu.gyro_lsb_per_dps, 1000.0f));
+    }
+
+    HAL_Delay(APP_GYRO_CAL_VERIFY_DELAY_MS);
+  }
+
+  verify_mean_mdps_x = (verify_sum_x / (float)APP_GYRO_CAL_VERIFY_SAMPLE_COUNT) * 1000.0f;
+  verify_mean_mdps_y = (verify_sum_y / (float)APP_GYRO_CAL_VERIFY_SAMPLE_COUNT) * 1000.0f;
+  verify_mean_mdps_z = (verify_sum_z / (float)APP_GYRO_CAL_VERIFY_SAMPLE_COUNT) * 1000.0f;
+
+  App_CdcPrint("GYRO_CAL: VERIFY_MEAN_MDPS=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(verify_mean_mdps_x, 1.0f),
+               (long)App_FloatToInt32Scaled(verify_mean_mdps_y, 1.0f),
+               (long)App_FloatToInt32Scaled(verify_mean_mdps_z, 1.0f));
+
+  if ((verify_mean_mdps_x > APP_GYRO_CAL_MAX_VERIFY_MEAN_MDPS) ||
+      (verify_mean_mdps_x < -APP_GYRO_CAL_MAX_VERIFY_MEAN_MDPS) ||
+      (verify_mean_mdps_y > APP_GYRO_CAL_MAX_VERIFY_MEAN_MDPS) ||
+      (verify_mean_mdps_y < -APP_GYRO_CAL_MAX_VERIFY_MEAN_MDPS) ||
+      (verify_mean_mdps_z > APP_GYRO_CAL_MAX_VERIFY_MEAN_MDPS) ||
+      (verify_mean_mdps_z < -APP_GYRO_CAL_MAX_VERIFY_MEAN_MDPS))
+  {
+    App_CdcPrint("GYRO_CAL: FAIL VERIFY_MEAN_TOO_HIGH\r\n");
+    return;
+  }
+
+  app_calibration_request(&calibration_app, APP_CAL_CMD_SAVE);
+  app_calibration_process(&calibration_app);
+  if ((calibration_app.status == SENSOR_CAL_OK) &&
+      (calibration_app.flash_status == CAL_STORAGE_OK))
+  {
+    App_CdcPrint("GYRO_CAL: PASS SAVED_TO_FLASH\r\n");
+  }
+  else
+  {
+    App_CdcPrint("GYRO_CAL: FAIL FLASH_SAVE status=%ld flash=%ld\r\n",
+                 (long)calibration_app.status,
+                 (long)calibration_app.flash_status);
+  }
+}
+#endif
+
+#ifdef CAL_ACCEL_ENABLE
+static void App_CalibrateAccelManualBlocking(void)
+{
+  sensor_cal_status_t status;
+
+  App_CdcPrint("\r\nACC_CAL: START\r\n");
+  App_CdcPrint("ACC_CAL: Keep cable loose. Follow each face command from terminal.\r\n");
+
+  if (imu_status != MPU6500_OK)
+  {
+    App_CdcPrint("ACC_CAL: FAIL IMU_NOT_READY status=%ld\r\n", (long)imu_status);
+    return;
+  }
+
+  sensor_cal_accel_six_position_clear(&calibration_app.accel_data);
+
+  status = App_AccelCalCollectFace(SENSOR_CAL_ACCEL_POS_X, "POS_X_UP", 0U, 1.0f);
+  if (status != SENSOR_CAL_OK) { return; }
+
+  status = App_AccelCalCollectFace(SENSOR_CAL_ACCEL_NEG_X, "NEG_X_UP", 0U, -1.0f);
+  if (status != SENSOR_CAL_OK) { return; }
+
+  status = App_AccelCalCollectFace(SENSOR_CAL_ACCEL_POS_Y, "POS_Y_UP", 1U, 1.0f);
+  if (status != SENSOR_CAL_OK) { return; }
+
+  status = App_AccelCalCollectFace(SENSOR_CAL_ACCEL_NEG_Y, "NEG_Y_UP", 1U, -1.0f);
+  if (status != SENSOR_CAL_OK) { return; }
+
+  status = App_AccelCalCollectFace(SENSOR_CAL_ACCEL_POS_Z, "POS_Z_UP", 2U, 1.0f);
+  if (status != SENSOR_CAL_OK) { return; }
+
+  status = App_AccelCalCollectFace(SENSOR_CAL_ACCEL_NEG_Z, "NEG_Z_UP", 2U, -1.0f);
+  if (status != SENSOR_CAL_OK) { return; }
+
+  App_CdcPrint("ACC_CAL: COMPUTE\r\n");
+  calibration_app.status = sensor_cal_mpu6500_accel_compute_six_position(&calibration_app.accel_data,
+                                                                         imu.accel_lsb_per_g,
+                                                                         &calibration_app.block.mpu6500);
+  if (calibration_app.status != SENSOR_CAL_OK)
+  {
+    App_CdcPrint("ACC_CAL: FAIL COMPUTE status=%ld\r\n", (long)calibration_app.status);
+    return;
+  }
+
+  app_calibration_apply_stored(&calibration_app);
+
+  App_CdcPrint("ACC_CAL: OFFSET_RAW_X1000=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(calibration_app.block.mpu6500.accel_offset_raw[0], 1000.0f),
+               (long)App_FloatToInt32Scaled(calibration_app.block.mpu6500.accel_offset_raw[1], 1000.0f),
+               (long)App_FloatToInt32Scaled(calibration_app.block.mpu6500.accel_offset_raw[2], 1000.0f));
+  App_CdcPrint("ACC_CAL: SCALE_X1000000=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(calibration_app.block.mpu6500.accel_scale[0], 1000000.0f),
+               (long)App_FloatToInt32Scaled(calibration_app.block.mpu6500.accel_scale[1], 1000000.0f),
+               (long)App_FloatToInt32Scaled(calibration_app.block.mpu6500.accel_scale[2], 1000000.0f));
+
+  app_calibration_request(&calibration_app, APP_CAL_CMD_SAVE);
+  app_calibration_process(&calibration_app);
+  if ((calibration_app.status == SENSOR_CAL_OK) &&
+      (calibration_app.flash_status == CAL_STORAGE_OK))
+  {
+    App_CdcPrint("ACC_CAL: PASS SAVED_TO_FLASH\r\n");
+  }
+  else
+  {
+    App_CdcPrint("ACC_CAL: FAIL FLASH_SAVE status=%ld flash=%ld\r\n",
+                 (long)calibration_app.status,
+                 (long)calibration_app.flash_status);
+  }
+}
+
+static sensor_cal_status_t App_AccelCalCollectFace(sensor_cal_accel_position_t position,
+                                                   const char *label,
+                                                   uint8_t dominant_axis,
+                                                   float expected_sign)
+{
+  uint32_t i;
+  uint32_t countdown;
+  mpu6500_raw_sample_t sample;
+  sensor_cal_vector_t gyro_corrected;
+  sensor_cal_vector_t mean;
+  float sum_x = 0.0f;
+  float sum_y = 0.0f;
+  float sum_z = 0.0f;
+  float min_x = 0.0f;
+  float min_y = 0.0f;
+  float min_z = 0.0f;
+  float max_x = 0.0f;
+  float max_y = 0.0f;
+  float max_z = 0.0f;
+  float gyro_sum_x = 0.0f;
+  float gyro_sum_y = 0.0f;
+  float gyro_sum_z = 0.0f;
+  float gravity_mag;
+  float dominant_value;
+  float cross_a;
+  float cross_b;
+  float dominant_min_raw = imu.accel_lsb_per_g * APP_ACCEL_CAL_MIN_DOMINANT_RAW_SCALE;
+  float cross_max_raw = imu.accel_lsb_per_g * APP_ACCEL_CAL_MAX_CROSS_RAW_SCALE;
+  float gyro_mean_mdps_x;
+  float gyro_mean_mdps_y;
+  float gyro_mean_mdps_z;
+
+  App_CdcPrint("\r\nACC_CAL: STEP PLACE_%s\r\n", label);
+  for (countdown = APP_ACCEL_CAL_MOVE_TIME_MS / 1000U; countdown > 0U; countdown--)
+  {
+    App_CdcPrint("ACC_CAL: MOVE_NOW %lu\r\n", (unsigned long)countdown);
+    HAL_Delay(1000U);
+  }
+
+  App_CdcPrint("ACC_CAL: DO_NOT_TOUCH %s\r\n", label);
+  for (countdown = APP_ACCEL_CAL_SETTLE_TIME_MS / 1000U; countdown > 0U; countdown--)
+  {
+    App_CdcPrint("ACC_CAL: SETTLING %lu\r\n", (unsigned long)countdown);
+    HAL_Delay(1000U);
+  }
+
+  App_CdcPrint("ACC_CAL: COLLECT %s samples=%lu delay_ms=%lu\r\n",
+               label,
+               (unsigned long)APP_ACCEL_CAL_SAMPLE_COUNT,
+               (unsigned long)APP_ACCEL_CAL_SAMPLE_DELAY_MS);
+
+  for (i = 0U; i < APP_ACCEL_CAL_SAMPLE_COUNT; i++)
+  {
+    float ax;
+    float ay;
+    float az;
+
+    if (mpu6500_read_raw(&imu, &sample) != MPU6500_OK)
+    {
+      App_CdcPrint("ACC_CAL: FAIL READ_ERROR %s sample=%lu\r\n",
+                   label,
+                   (unsigned long)i);
+      return SENSOR_CAL_ERROR_SENSOR;
+    }
+
+    ax = (float)sample.accel.x;
+    ay = (float)sample.accel.y;
+    az = (float)sample.accel.z;
+
+    if (i == 0U)
+    {
+      min_x = max_x = ax;
+      min_y = max_y = ay;
+      min_z = max_z = az;
+    }
+
+    if (ax < min_x) { min_x = ax; }
+    if (ay < min_y) { min_y = ay; }
+    if (az < min_z) { min_z = az; }
+    if (ax > max_x) { max_x = ax; }
+    if (ay > max_y) { max_y = ay; }
+    if (az > max_z) { max_z = az; }
+
+    sum_x += ax;
+    sum_y += ay;
+    sum_z += az;
+
+    sensor_cal_apply_mpu6500_gyro_raw(&calibration_app.block.mpu6500, &sample.gyro, &gyro_corrected);
+    gyro_sum_x += gyro_corrected.x / imu.gyro_lsb_per_dps;
+    gyro_sum_y += gyro_corrected.y / imu.gyro_lsb_per_dps;
+    gyro_sum_z += gyro_corrected.z / imu.gyro_lsb_per_dps;
+
+    if ((i % APP_ACCEL_CAL_PRINT_PERIOD) == 0U)
+    {
+      App_CdcPrint("ACC_RAW: %s sample=%lu,X=%ld,Y=%ld,Z=%ld,GYRO_MDPS=%ld,%ld,%ld\r\n",
+                   label,
+                   (unsigned long)i,
+                   (long)sample.accel.x,
+                   (long)sample.accel.y,
+                   (long)sample.accel.z,
+                   (long)App_FloatToInt32Scaled(gyro_corrected.x / imu.gyro_lsb_per_dps, 1000.0f),
+                   (long)App_FloatToInt32Scaled(gyro_corrected.y / imu.gyro_lsb_per_dps, 1000.0f),
+                   (long)App_FloatToInt32Scaled(gyro_corrected.z / imu.gyro_lsb_per_dps, 1000.0f));
+    }
+
+    HAL_Delay(APP_ACCEL_CAL_SAMPLE_DELAY_MS);
+  }
+
+  mean.x = sum_x / (float)APP_ACCEL_CAL_SAMPLE_COUNT;
+  mean.y = sum_y / (float)APP_ACCEL_CAL_SAMPLE_COUNT;
+  mean.z = sum_z / (float)APP_ACCEL_CAL_SAMPLE_COUNT;
+  gravity_mag = sqrtf((mean.x * mean.x) + (mean.y * mean.y) + (mean.z * mean.z));
+  gyro_mean_mdps_x = (gyro_sum_x / (float)APP_ACCEL_CAL_SAMPLE_COUNT) * 1000.0f;
+  gyro_mean_mdps_y = (gyro_sum_y / (float)APP_ACCEL_CAL_SAMPLE_COUNT) * 1000.0f;
+  gyro_mean_mdps_z = (gyro_sum_z / (float)APP_ACCEL_CAL_SAMPLE_COUNT) * 1000.0f;
+
+  if (dominant_axis == 0U)
+  {
+    dominant_value = mean.x * expected_sign;
+    cross_a = fabsf(mean.y);
+    cross_b = fabsf(mean.z);
+  }
+  else if (dominant_axis == 1U)
+  {
+    dominant_value = mean.y * expected_sign;
+    cross_a = fabsf(mean.x);
+    cross_b = fabsf(mean.z);
+  }
+  else
+  {
+    dominant_value = mean.z * expected_sign;
+    cross_a = fabsf(mean.x);
+    cross_b = fabsf(mean.y);
+  }
+
+  App_CdcPrint("ACC_CAL: MEAN_%s=%ld,%ld,%ld\r\n",
+               label,
+               (long)App_FloatToInt32Scaled(mean.x, 1.0f),
+               (long)App_FloatToInt32Scaled(mean.y, 1.0f),
+               (long)App_FloatToInt32Scaled(mean.z, 1.0f));
+  App_CdcPrint("ACC_CAL: RANGE_RAW_%s=%ld,%ld,%ld\r\n",
+               label,
+               (long)App_FloatToInt32Scaled(max_x - min_x, 1.0f),
+               (long)App_FloatToInt32Scaled(max_y - min_y, 1.0f),
+               (long)App_FloatToInt32Scaled(max_z - min_z, 1.0f));
+  App_CdcPrint("ACC_CAL: GRAVITY_RAW_%s=%ld\r\n",
+               label,
+               (long)App_FloatToInt32Scaled(gravity_mag, 1.0f));
+  App_CdcPrint("ACC_CAL: GYRO_MEAN_MDPS_%s=%ld,%ld,%ld\r\n",
+               label,
+               (long)App_FloatToInt32Scaled(gyro_mean_mdps_x, 1.0f),
+               (long)App_FloatToInt32Scaled(gyro_mean_mdps_y, 1.0f),
+               (long)App_FloatToInt32Scaled(gyro_mean_mdps_z, 1.0f));
+
+  if (((max_x - min_x) > APP_ACCEL_CAL_MAX_RANGE_RAW) ||
+      ((max_y - min_y) > APP_ACCEL_CAL_MAX_RANGE_RAW) ||
+      ((max_z - min_z) > APP_ACCEL_CAL_MAX_RANGE_RAW))
+  {
+    App_CdcPrint("ACC_CAL: FAIL %s ACC_RANGE_TOO_HIGH\r\n", label);
+    return SENSOR_CAL_ERROR_BAD_DATA;
+  }
+
+  if (fabsf(gravity_mag - imu.accel_lsb_per_g) > APP_ACCEL_CAL_MAX_GRAVITY_ERROR_RAW)
+  {
+    App_CdcPrint("ACC_CAL: FAIL %s GRAVITY_MAG_BAD\r\n", label);
+    return SENSOR_CAL_ERROR_BAD_DATA;
+  }
+
+  if ((dominant_value < dominant_min_raw) ||
+      (cross_a > cross_max_raw) ||
+      (cross_b > cross_max_raw))
+  {
+    App_CdcPrint("ACC_CAL: FAIL %s WRONG_FACE_OR_ALIGNMENT\r\n", label);
+    return SENSOR_CAL_ERROR_BAD_DATA;
+  }
+
+  if ((fabsf(gyro_mean_mdps_x) > APP_ACCEL_CAL_MAX_GYRO_MEAN_MDPS) ||
+      (fabsf(gyro_mean_mdps_y) > APP_ACCEL_CAL_MAX_GYRO_MEAN_MDPS) ||
+      (fabsf(gyro_mean_mdps_z) > APP_ACCEL_CAL_MAX_GYRO_MEAN_MDPS))
+  {
+    App_CdcPrint("ACC_CAL: FAIL %s GYRO_MEAN_TOO_HIGH\r\n", label);
+    return SENSOR_CAL_ERROR_BAD_DATA;
+  }
+
+  calibration_app.accel_data.mean[position] = mean;
+  calibration_app.accel_data.valid[position] = 1U;
+  App_CdcPrint("ACC_CAL: PASS_%s\r\n", label);
+
+  return SENSOR_CAL_OK;
+}
+#endif
+
+#ifdef CAL_MAG_ENABLE
+static void App_CalibrateMagManualBlocking(void)
+{
+  sensor_cal_mag_minmax_t mag_data;
+  sensor_cal_status_t cal_status;
+  lis3mdl_vector_t sample;
+  uint32_t sample_index;
+  uint32_t sample_count;
+  uint32_t elapsed_ms;
+  float range_x;
+  float range_y;
+  float range_z;
+  float min_range;
+  float max_range;
+  float radius_x;
+  float radius_y;
+  float radius_z;
+  float average_radius;
+  float estimated_field_uT;
+
+  App_CdcPrint("\r\nMAG_CAL: START\r\n");
+  App_CdcPrint("MAG_CAL: Move away from metal, magnets, speakers, laptop edges.\r\n");
+  App_CdcPrint("MAG_CAL: Keep USB cable loose and away from sensor.\r\n");
+  App_CdcPrint("MAG_CAL: North direction is NOT required.\r\n");
+  App_CdcPrint("MAG_CAL: Rotate slowly. Do not shake.\r\n");
+  App_CdcPrint("MAG_CAL: Keep board in same area. Do not walk around.\r\n");
+
+  if (mag_status != LIS3MDL_OK)
+  {
+    App_CdcPrint("MAG_CAL: FAIL MAG_NOT_READY status=%ld\r\n", (long)mag_status);
+    return;
+  }
+
+  sensor_cal_lis3mdl_mag_minmax_start(&mag_data);
+  sample_count = APP_MAG_CAL_DURATION_MS / APP_MAG_CAL_SAMPLE_DELAY_MS;
+
+  App_CdcPrint("MAG_CAL: COLLECT duration_ms=%lu samples=%lu delay_ms=%lu\r\n",
+               (unsigned long)APP_MAG_CAL_DURATION_MS,
+               (unsigned long)sample_count,
+               (unsigned long)APP_MAG_CAL_SAMPLE_DELAY_MS);
+
+  for (sample_index = 0U; sample_index < sample_count; sample_index++)
+  {
+    elapsed_ms = sample_index * APP_MAG_CAL_SAMPLE_DELAY_MS;
+
+    if ((elapsed_ms % APP_MAG_CAL_ACTION_PERIOD_MS) == 0U)
+    {
+      uint32_t time_left = (APP_MAG_CAL_DURATION_MS - elapsed_ms) / 1000U;
+      App_CdcPrint("MAG_CAL: TIME_LEFT %lu\r\n", (unsigned long)time_left);
+      App_CdcPrint("MAG_CAL: ACTION %s\r\n", App_MagCalActionText(elapsed_ms));
+    }
+
+    if (lis3mdl_read_gauss(&mag, &sample) != LIS3MDL_OK)
+    {
+      App_CdcPrint("MAG_CAL: FAIL READ_ERROR sample=%lu\r\n", (unsigned long)sample_index);
+      return;
+    }
+
+    if (sample.x < mag_data.min_gauss.x) { mag_data.min_gauss.x = sample.x; }
+    if (sample.y < mag_data.min_gauss.y) { mag_data.min_gauss.y = sample.y; }
+    if (sample.z < mag_data.min_gauss.z) { mag_data.min_gauss.z = sample.z; }
+    if (sample.x > mag_data.max_gauss.x) { mag_data.max_gauss.x = sample.x; }
+    if (sample.y > mag_data.max_gauss.y) { mag_data.max_gauss.y = sample.y; }
+    if (sample.z > mag_data.max_gauss.z) { mag_data.max_gauss.z = sample.z; }
+    mag_data.sample_count++;
+
+    if ((sample_index % APP_MAG_CAL_PRINT_PERIOD) == 0U)
+    {
+      range_x = mag_data.max_gauss.x - mag_data.min_gauss.x;
+      range_y = mag_data.max_gauss.y - mag_data.min_gauss.y;
+      range_z = mag_data.max_gauss.z - mag_data.min_gauss.z;
+      App_CdcPrint("MAG_RAW_GAUSS_X1000: sample=%lu,X=%ld,Y=%ld,Z=%ld\r\n",
+                   (unsigned long)sample_index,
+                   (long)App_FloatToInt32Scaled(sample.x, 1000.0f),
+                   (long)App_FloatToInt32Scaled(sample.y, 1000.0f),
+                   (long)App_FloatToInt32Scaled(sample.z, 1000.0f));
+      App_CdcPrint("MAG_RANGE_GAUSS_X1000: X=%ld,Y=%ld,Z=%ld\r\n",
+                   (long)App_FloatToInt32Scaled(range_x, 1000.0f),
+                   (long)App_FloatToInt32Scaled(range_y, 1000.0f),
+                   (long)App_FloatToInt32Scaled(range_z, 1000.0f));
+    }
+
+    HAL_Delay(APP_MAG_CAL_SAMPLE_DELAY_MS);
+  }
+
+  range_x = mag_data.max_gauss.x - mag_data.min_gauss.x;
+  range_y = mag_data.max_gauss.y - mag_data.min_gauss.y;
+  range_z = mag_data.max_gauss.z - mag_data.min_gauss.z;
+  min_range = range_x;
+  max_range = range_x;
+  if (range_y < min_range) { min_range = range_y; }
+  if (range_z < min_range) { min_range = range_z; }
+  if (range_y > max_range) { max_range = range_y; }
+  if (range_z > max_range) { max_range = range_z; }
+
+  radius_x = range_x * 0.5f;
+  radius_y = range_y * 0.5f;
+  radius_z = range_z * 0.5f;
+  average_radius = (radius_x + radius_y + radius_z) / 3.0f;
+  estimated_field_uT = average_radius * APP_GAUSS_TO_MICROTESLA;
+
+  App_CdcPrint("MAG_CAL: SAMPLE_COUNT=%lu\r\n", (unsigned long)mag_data.sample_count);
+  App_CdcPrint("MAG_CAL: MIN_GAUSS_X1000=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(mag_data.min_gauss.x, 1000.0f),
+               (long)App_FloatToInt32Scaled(mag_data.min_gauss.y, 1000.0f),
+               (long)App_FloatToInt32Scaled(mag_data.min_gauss.z, 1000.0f));
+  App_CdcPrint("MAG_CAL: MAX_GAUSS_X1000=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(mag_data.max_gauss.x, 1000.0f),
+               (long)App_FloatToInt32Scaled(mag_data.max_gauss.y, 1000.0f),
+               (long)App_FloatToInt32Scaled(mag_data.max_gauss.z, 1000.0f));
+  App_CdcPrint("MAG_CAL: RANGE_GAUSS_X1000=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(range_x, 1000.0f),
+               (long)App_FloatToInt32Scaled(range_y, 1000.0f),
+               (long)App_FloatToInt32Scaled(range_z, 1000.0f));
+  App_CdcPrint("MAG_CAL: EST_FIELD_UT=%ld\r\n",
+               (long)App_FloatToInt32Scaled(estimated_field_uT, 1.0f));
+
+  if (mag_data.sample_count < APP_MAG_CAL_MIN_SAMPLE_COUNT)
+  {
+    App_CdcPrint("MAG_CAL: FAIL NOT_ENOUGH_SAMPLES\r\n");
+    return;
+  }
+
+  if ((range_x < APP_MAG_CAL_MIN_RANGE_GAUSS) ||
+      (range_y < APP_MAG_CAL_MIN_RANGE_GAUSS) ||
+      (range_z < APP_MAG_CAL_MIN_RANGE_GAUSS))
+  {
+    App_CdcPrint("MAG_CAL: FAIL RANGE_TOO_SMALL\r\n");
+    App_CdcPrint("MAG_CAL: Retry and rotate more in all 3D directions, especially the small-range axis.\r\n");
+    return;
+  }
+
+  if ((min_range <= 0.0f) || ((max_range / min_range) > APP_MAG_CAL_MAX_RANGE_RATIO))
+  {
+    App_CdcPrint("MAG_CAL: FAIL COVERAGE_UNBALANCED\r\n");
+    App_CdcPrint("MAG_CAL: Retry with more upside-down and diagonal rotations.\r\n");
+    return;
+  }
+
+  if ((estimated_field_uT < APP_MAG_CAL_MIN_FIELD_UT) ||
+      (estimated_field_uT > APP_MAG_CAL_MAX_FIELD_UT))
+  {
+    App_CdcPrint("MAG_CAL: FAIL FIELD_OUT_OF_RANGE\r\n");
+    App_CdcPrint("MAG_CAL: Move farther from metal/magnets and retry.\r\n");
+    return;
+  }
+
+  App_CdcPrint("MAG_CAL: COMPUTE\r\n");
+  cal_status = sensor_cal_lis3mdl_mag_minmax_finish(&mag_data, &calibration_app.block.lis3mdl);
+  calibration_app.status = cal_status;
+  if (cal_status != SENSOR_CAL_OK)
+  {
+    App_CdcPrint("MAG_CAL: FAIL COMPUTE status=%ld\r\n", (long)cal_status);
+    return;
+  }
+
+  app_calibration_apply_stored(&calibration_app);
+
+  App_CdcPrint("MAG_CAL: HARD_IRON_GAUSS_X1000=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(calibration_app.block.lis3mdl.hard_iron_gauss[0], 1000.0f),
+               (long)App_FloatToInt32Scaled(calibration_app.block.lis3mdl.hard_iron_gauss[1], 1000.0f),
+               (long)App_FloatToInt32Scaled(calibration_app.block.lis3mdl.hard_iron_gauss[2], 1000.0f));
+  App_CdcPrint("MAG_CAL: SOFT_SCALE_X1000000=%ld,%ld,%ld\r\n",
+               (long)App_FloatToInt32Scaled(calibration_app.block.lis3mdl.soft_iron_matrix[0][0], 1000000.0f),
+               (long)App_FloatToInt32Scaled(calibration_app.block.lis3mdl.soft_iron_matrix[1][1], 1000000.0f),
+               (long)App_FloatToInt32Scaled(calibration_app.block.lis3mdl.soft_iron_matrix[2][2], 1000000.0f));
+
+  app_calibration_request(&calibration_app, APP_CAL_CMD_SAVE);
+  app_calibration_process(&calibration_app);
+  if ((calibration_app.status == SENSOR_CAL_OK) &&
+      (calibration_app.flash_status == CAL_STORAGE_OK))
+  {
+    App_CdcPrint("MAG_CAL: PASS SAVED_TO_FLASH\r\n");
+  }
+  else
+  {
+    App_CdcPrint("MAG_CAL: FAIL FLASH_SAVE status=%ld flash=%ld\r\n",
+                 (long)calibration_app.status,
+                 (long)calibration_app.flash_status);
+  }
+}
+
+static const char *App_MagCalActionText(uint32_t elapsed_ms)
+{
+  if (elapsed_ms < 10000U)
+  {
+    return "STEP 1/6 FLAT_YAW: keep board mostly flat, slowly rotate like compass heading.";
+  }
+  if (elapsed_ms < 20000U)
+  {
+    return "STEP 2/6 ROLL: slowly roll left edge up, then right edge up.";
+  }
+  if (elapsed_ms < 30000U)
+  {
+    return "STEP 3/6 PITCH: slowly pitch front edge up, then back edge up.";
+  }
+  if (elapsed_ms < 40000U)
+  {
+    return "STEP 4/6 UPSIDE_DOWN: turn board upside down and rotate slowly.";
+  }
+  if (elapsed_ms < 50000U)
+  {
+    return "STEP 5/6 DIAGONAL: hold one corner up, rotate, then another corner up.";
+  }
+  return "STEP 6/6 FULL_3D: slow random 3D rotation, cover any missing directions.";
 }
 #endif
 

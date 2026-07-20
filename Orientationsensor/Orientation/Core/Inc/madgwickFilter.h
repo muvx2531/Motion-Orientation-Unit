@@ -10,7 +10,7 @@
 
 // Include a hardware specific header file to redefine these predetermined values
 #ifndef DELTA_T
-    #define DELTA_T 0.01f // 100Hz sampling frequency
+    #define DELTA_T 0.2f // 100Hz sampling frequency
 #endif
 
 #ifndef PI  
