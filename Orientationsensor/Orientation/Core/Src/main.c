@@ -59,6 +59,7 @@ typedef struct
   float pressure_pa;
   float temperature_c;
   euler_angles_t euler;
+  euler_angles_t accel_euler;
 } telemetry_sample_t;
 
 /* USER CODE END PTD */
@@ -110,12 +111,20 @@ typedef struct
 #endif
 
 #define APP_SENSOR_READ_PERIOD_MS             10U
-#define APP_TELEMETRY_PERIOD_MS               100U
+#define APP_IMU_PERIOD_US                     10000U
+#define APP_MAG_PERIOD_US                     50000U
+#define APP_PRS_PERIOD_US                     100000U
+#define APP_TELEMETRY_PERIOD_US               100000U
+#define APP_ORIENTATION_DT_DEFAULT_S          0.01f
+#define APP_ORIENTATION_DT_MIN_S              0.001f
+#define APP_ORIENTATION_DT_MAX_S              0.05f
 #define APP_CDC_PRINT_RETRY_COUNT             20U
 #define APP_CDC_PRINT_RETRY_DELAY_MS          2U
 #define APP_STANDARD_GRAVITY_MPS2             9.80665f
 #define APP_GAUSS_TO_MICROTESLA               100.0f
 #define APP_DEG_TO_RAD                        0.017453292519943295f
+#define APP_RAD_TO_DEG                        57.29577951308232f
+#define APP_MADGWICK_IMU_ONLY_TEST            0U
 
 #if defined(CAL_GYRO_ENABLE) || defined(CAL_ACCEL_ENABLE) || defined(CAL_MAG_ENABLE)
 #define APP_CAL_MODE_ACTIVE                   1U
@@ -152,7 +161,7 @@ typedef struct
 #define APP_ACCEL_CAL_MAX_GRAVITY_ERROR_RAW   900.0f
 #define APP_ACCEL_CAL_MIN_DOMINANT_RAW_SCALE  0.70f
 #define APP_ACCEL_CAL_MAX_CROSS_RAW_SCALE     0.45f
-#define APP_ACCEL_CAL_MAX_GYRO_MEAN_MDPS      200.0f
+#define APP_ACCEL_CAL_MAX_GYRO_MEAN_MDPS      300.0f
 #endif
 
 #ifdef CAL_MAG_ENABLE
@@ -206,7 +215,11 @@ static lis3mdl_vector_t mag_raw_gauss;
 static lis3mdl_vector_t mag_compensated_gauss;
 static dps310_sample_t prs_compensated_sample;
 static telemetry_sample_t telemetry_sample;
-static uint32_t telemetry_last_send_ms = 0U;
+static uint32_t app_last_imu_us = 0U;
+static uint32_t app_last_mag_us = 0U;
+static uint32_t app_last_prs_us = 0U;
+static uint32_t app_last_telemetry_us = 0U;
+static uint8_t app_scheduler_started = 0U;
 #endif
 
 volatile mpu6500_status_t imu_status = MPU6500_ERROR;
@@ -229,13 +242,18 @@ static void MX_TIM2_Init(void);
 static void App_SensorsInit(void);
 static void App_SensorsCalibrationSection(void);
 #if (APP_CAL_MODE_ACTIVE == 0U)
-static void App_SensorsReadAndCompensate(void);
-static void App_OrientationUpdateMadgwick(void);
+static void App_NormalModeProcess(uint32_t now_us);
+static void App_ReadImuAndCompensate(void);
+static void App_ReadMagAndCompensate(void);
+static void App_ReadPressureCompensated(void);
+static void App_OrientationUpdateMadgwick(float delta_t_s);
 static void App_TelemetryUpdateSample(uint64_t timestamp_us);
 static void App_TelemetrySendCdc(void);
+static void App_UpdateAccelOnlyAngles(void);
+static float App_ClampOrientationDeltaTime(uint32_t delta_us);
+static uint64_t App_TimestampUs(void);
 #endif
 static int32_t App_FloatToInt32Scaled(float value, float scale);
-static uint64_t App_TimestampUs(void);
 #if (APP_CAL_MODE_ACTIVE != 0U)
 static void App_CdcPrint(const char *format, ...);
 #endif
@@ -325,17 +343,11 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    uint64_t timestamp_us = App_TimestampUs();
-
 #if (APP_CAL_MODE_ACTIVE == 0U)
-    App_SensorsReadAndCompensate();
-    App_OrientationUpdateMadgwick();
-    App_TelemetryUpdateSample(timestamp_us);
-    App_TelemetrySendCdc();
+    App_NormalModeProcess((uint32_t)App_TimestampUs());
 #else
-    (void)timestamp_us;
-#endif
     HAL_Delay(APP_SENSOR_READ_PERIOD_MS);
+#endif
   }
   /* USER CODE END 3 */
 }
@@ -504,7 +516,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -542,7 +554,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 95;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 0xFFFFFFFFUL;
+  htim2.Init.Period = 4.294967295E9;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -678,7 +690,49 @@ static void App_SensorsCalibrationSection(void)
 }
 
 #if (APP_CAL_MODE_ACTIVE == 0U)
-static void App_SensorsReadAndCompensate(void)
+static void App_NormalModeProcess(uint32_t now_us)
+{
+  if (app_scheduler_started == 0U)
+  {
+    app_last_imu_us = now_us;
+    app_last_mag_us = now_us;
+    app_last_prs_us = now_us;
+    app_last_telemetry_us = now_us;
+    app_scheduler_started = 1U;
+    return;
+  }
+
+  if ((uint32_t)(now_us - app_last_mag_us) >= APP_MAG_PERIOD_US)
+  {
+    app_last_mag_us += APP_MAG_PERIOD_US;
+    App_ReadMagAndCompensate();
+  }
+
+  if ((uint32_t)(now_us - app_last_prs_us) >= APP_PRS_PERIOD_US)
+  {
+    app_last_prs_us += APP_PRS_PERIOD_US;
+    App_ReadPressureCompensated();
+  }
+
+  if ((uint32_t)(now_us - app_last_imu_us) >= APP_IMU_PERIOD_US)
+  {
+    uint32_t delta_us = (uint32_t)(now_us - app_last_imu_us);
+    float delta_t_s = App_ClampOrientationDeltaTime(delta_us);
+
+    app_last_imu_us = now_us;
+    App_ReadImuAndCompensate();
+    App_OrientationUpdateMadgwick(delta_t_s);
+    App_TelemetryUpdateSample(now_us);
+  }
+
+  if ((uint32_t)(now_us - app_last_telemetry_us) >= APP_TELEMETRY_PERIOD_US)
+  {
+    app_last_telemetry_us += APP_TELEMETRY_PERIOD_US;
+    App_TelemetrySendCdc();
+  }
+}
+
+static void App_ReadImuAndCompensate(void)
 {
   if (imu_status == MPU6500_OK)
   {
@@ -693,7 +747,10 @@ static void App_SensorsReadAndCompensate(void)
                                         &gyro_compensated_raw);
     }
   }
+}
 
+static void App_ReadMagAndCompensate(void)
+{
   if (mag_status == LIS3MDL_OK)
   {
     mag_read_status = lis3mdl_read_gauss(&mag, &mag_raw_gauss);
@@ -704,7 +761,10 @@ static void App_SensorsReadAndCompensate(void)
                                      &mag_compensated_gauss);
     }
   }
+}
 
+static void App_ReadPressureCompensated(void)
+{
   if (prs_status == DPS310_OK)
   {
     prs_read_status = dps310_read_compensated(&prs,
@@ -715,7 +775,7 @@ static void App_SensorsReadAndCompensate(void)
   }
 }
 
-static void App_OrientationUpdateMadgwick(void)
+static void App_OrientationUpdateMadgwick(float delta_t_s)
 {
   float accel_g_x;
   float accel_g_y;
@@ -737,6 +797,9 @@ static void App_OrientationUpdateMadgwick(void)
   gyro_rad_s_y = (gyro_compensated_raw.y / imu.gyro_lsb_per_dps) * APP_DEG_TO_RAD;
   gyro_rad_s_z = (gyro_compensated_raw.z / imu.gyro_lsb_per_dps) * APP_DEG_TO_RAD;
 
+  madgwick_set_delta_t(delta_t_s);
+
+#if (APP_MADGWICK_IMU_ONLY_TEST == 0U)
   if ((mag_status == LIS3MDL_OK) && (mag_read_status == LIS3MDL_OK))
   {
     marg_filter(accel_g_x,
@@ -750,6 +813,7 @@ static void App_OrientationUpdateMadgwick(void)
                 mag_compensated_gauss.z);
   }
   else
+#endif
   {
     imu_filter(accel_g_x,
                accel_g_y,
@@ -765,6 +829,23 @@ static void App_OrientationUpdateMadgwick(void)
               &telemetry_sample.euler.yaw_deg);
 }
 
+static float App_ClampOrientationDeltaTime(uint32_t delta_us)
+{
+  float delta_t_s = (float)delta_us * 0.000001f;
+
+  if (delta_t_s < APP_ORIENTATION_DT_MIN_S)
+  {
+    return APP_ORIENTATION_DT_DEFAULT_S;
+  }
+
+  if (delta_t_s > APP_ORIENTATION_DT_MAX_S)
+  {
+    return APP_ORIENTATION_DT_MAX_S;
+  }
+
+  return delta_t_s;
+}
+
 static void App_TelemetryUpdateSample(uint64_t timestamp_us)
 {
   telemetry_sample.timestamp_us = timestamp_us;
@@ -778,6 +859,8 @@ static void App_TelemetryUpdateSample(uint64_t timestamp_us)
     telemetry_sample.gyro_dps.x = gyro_compensated_raw.x / imu.gyro_lsb_per_dps;
     telemetry_sample.gyro_dps.y = gyro_compensated_raw.y / imu.gyro_lsb_per_dps;
     telemetry_sample.gyro_dps.z = gyro_compensated_raw.z / imu.gyro_lsb_per_dps;
+
+    App_UpdateAccelOnlyAngles();
   }
 
   if ((mag_status == LIS3MDL_OK) && (mag_read_status == LIS3MDL_OK))
@@ -798,20 +881,14 @@ static void App_TelemetrySendCdc(void)
 {
   static char frame[384];
   int length;
-  uint32_t now_ms = HAL_GetTick();
   uint32_t timestamp_us_32 = (uint32_t)telemetry_sample.timestamp_us;
-
-  if ((now_ms - telemetry_last_send_ms) < APP_TELEMETRY_PERIOD_MS)
-  {
-    return;
-  }
-  telemetry_last_send_ms = now_ms;
 
   length = snprintf(frame,
                     sizeof(frame),
                     "TUS=%lu,ACC_MPS2_1000=%ld,%ld,%ld,GYRO_MDPS=%ld,%ld,%ld,"
                     "MAG_UT100=%ld,%ld,%ld,P_PA100=%ld,T_C100=%ld,"
-                    "ROLL_MDEG=%ld,PITCH_MDEG=%ld,YAW_MDEG=%ld\r\n",
+                    "ROLL_MDEG=%ld,PITCH_MDEG=%ld,YAW_MDEG=%ld,"
+                    "ACC_ROLL_MDEG=%ld,ACC_PITCH_MDEG=%ld\r\n",
                     (unsigned long)timestamp_us_32,
                     (long)App_FloatToInt32Scaled(telemetry_sample.accel_mps2.x, 1000.0f),
                     (long)App_FloatToInt32Scaled(telemetry_sample.accel_mps2.y, 1000.0f),
@@ -826,12 +903,27 @@ static void App_TelemetrySendCdc(void)
                     (long)App_FloatToInt32Scaled(telemetry_sample.temperature_c, 100.0f),
                     (long)App_FloatToInt32Scaled(telemetry_sample.euler.roll_deg, 1000.0f),
                     (long)App_FloatToInt32Scaled(telemetry_sample.euler.pitch_deg, 1000.0f),
-                    (long)App_FloatToInt32Scaled(telemetry_sample.euler.yaw_deg, 1000.0f));
+                    (long)App_FloatToInt32Scaled(telemetry_sample.euler.yaw_deg, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.accel_euler.roll_deg, 1000.0f),
+                    (long)App_FloatToInt32Scaled(telemetry_sample.accel_euler.pitch_deg, 1000.0f));
 
   if ((length > 0) && (length < (int)sizeof(frame)))
   {
     (void)CDC_Transmit_FS((uint8_t *)frame, (uint16_t)length);
   }
+}
+#endif
+
+#if (APP_CAL_MODE_ACTIVE == 0U)
+static void App_UpdateAccelOnlyAngles(void)
+{
+  float ax = telemetry_sample.accel_mps2.x;
+  float ay = telemetry_sample.accel_mps2.y;
+  float az = telemetry_sample.accel_mps2.z;
+
+  telemetry_sample.accel_euler.roll_deg = atan2f(ay, az) * APP_RAD_TO_DEG;
+  telemetry_sample.accel_euler.pitch_deg = atan2f(-ax, sqrtf((ay * ay) + (az * az))) * APP_RAD_TO_DEG;
+  telemetry_sample.accel_euler.yaw_deg = 0.0f;
 }
 #endif
 
@@ -847,10 +939,12 @@ static int32_t App_FloatToInt32Scaled(float value, float scale)
   return (int32_t)(scaled - 0.5f);
 }
 
+#if (APP_CAL_MODE_ACTIVE == 0U)
 static uint64_t App_TimestampUs(void)
 {
   return (uint64_t)__HAL_TIM_GET_COUNTER(&htim2);
 }
+#endif
 
 #if (APP_CAL_MODE_ACTIVE != 0U)
 static void App_CdcPrint(const char *format, ...)

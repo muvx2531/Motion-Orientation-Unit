@@ -3,7 +3,8 @@
 ../Core/Inc/madgwickFilter.h:61:20:quat_sub	48	static
 ../Core/Inc/madgwickFilter.h:80:21:quat_Norm	24	static
 ../Core/Inc/madgwickFilter.h:86:20:quat_Normalization	24	static
-../Core/Src/madgwickFilter.c:12:19:quat_mult	88	static
-../Core/Src/madgwickFilter.c:28:6:imu_filter	184	static
-../Core/Src/madgwickFilter.c:122:6:marg_filter	192	static
-../Core/Src/madgwickFilter.c:244:6:eulerAngles	40	static
+../Core/Src/madgwickFilter.c:13:6:madgwick_set_delta_t	16	static
+../Core/Src/madgwickFilter.c:21:19:quat_mult	88	static
+../Core/Src/madgwickFilter.c:37:6:imu_filter	184	static
+../Core/Src/madgwickFilter.c:131:6:marg_filter	184	static
+../Core/Src/madgwickFilter.c:253:6:eulerAngles	48	static

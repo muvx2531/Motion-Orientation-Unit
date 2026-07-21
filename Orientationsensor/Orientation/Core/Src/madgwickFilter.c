@@ -8,6 +8,15 @@
 #include "madgwickFilter.h"
 
 struct quaternion q_est = { 1, 0, 0, 0};       // initialize with as unit vector with real component  = 1
+static float madgwick_delta_t_s = DELTA_T;
+
+void madgwick_set_delta_t(float delta_t_s)
+{
+    if (delta_t_s > 0.0f)
+    {
+        madgwick_delta_t_s = delta_t_s;
+    }
+}
 
 struct quaternion quat_mult (struct quaternion L, struct quaternion R){
     
@@ -111,7 +120,7 @@ void imu_filter(float ax, float ay, float az, float gx, float gy, float gz){
     */
     quat_scalar(&gradient, BETA);             // multiply normalized gradient by beta
     quat_sub(&q_est_dot, q_w, gradient);        // subtract above from q_w, the integrated gyro quaternion
-    quat_scalar(&q_est_dot, DELTA_T);
+    quat_scalar(&q_est_dot, madgwick_delta_t_s);
     quat_add(&q_est, q_est_prev, q_est_dot);     // Integrate orientation rate to find position
     quat_Normalization(&q_est);                 // normalize the orientation of the estimate
                                                 //(shown in diagram, plus always use unit quaternions for orientation)
@@ -227,10 +236,10 @@ void marg_filter(float ax, float ay, float az,
     qDot2 -= BETA * s2;
     qDot3 -= BETA * s3;
 
-    q_est.q1 += qDot0 * DELTA_T;
-    q_est.q2 += qDot1 * DELTA_T;
-    q_est.q3 += qDot2 * DELTA_T;
-    q_est.q4 += qDot3 * DELTA_T;
+    q_est.q1 += qDot0 * madgwick_delta_t_s;
+    q_est.q2 += qDot1 * madgwick_delta_t_s;
+    q_est.q3 += qDot2 * madgwick_delta_t_s;
+    q_est.q4 += qDot3 * madgwick_delta_t_s;
     quat_Normalization(&q_est);
 }
 
@@ -242,11 +251,25 @@ void marg_filter(float ax, float ay, float az,
  Yaw is about the z axis, represented as psi (trident looking greek symbol)
  */
 void eulerAngles(struct quaternion q, float* roll, float* pitch, float* yaw){
-    
-    *yaw = atan2f((2*q.q2*q.q3 - 2*q.q1*q.q4), (2*q.q1*q.q1 + 2*q.q2*q.q2 -1));  // equation (7)
-    *pitch = -asinf(2*q.q2*q.q4 + 2*q.q1*q.q3);                                  // equatino (8)
-    *roll  = atan2f((2*q.q3*q.q4 - 2*q.q1*q.q2), (2*q.q1*q.q1 + 2*q.q4*q.q4 -1));
-    
+    float sin_pitch;
+
+    *roll = atan2f((2.0f * ((q.q1 * q.q2) + (q.q3 * q.q4))),
+                   (1.0f - (2.0f * ((q.q2 * q.q2) + (q.q3 * q.q3)))));
+
+    sin_pitch = 2.0f * ((q.q1 * q.q3) - (q.q4 * q.q2));
+    if (sin_pitch > 1.0f)
+    {
+        sin_pitch = 1.0f;
+    }
+    else if (sin_pitch < -1.0f)
+    {
+        sin_pitch = -1.0f;
+    }
+    *pitch = asinf(sin_pitch);
+
+    *yaw = atan2f((2.0f * ((q.q1 * q.q4) + (q.q2 * q.q3))),
+                  (1.0f - (2.0f * ((q.q3 * q.q3) + (q.q4 * q.q4)))));
+
     *yaw *= (180.0f / PI);
     *pitch *= (180.0f / PI);
     *roll *= (180.0f / PI);
