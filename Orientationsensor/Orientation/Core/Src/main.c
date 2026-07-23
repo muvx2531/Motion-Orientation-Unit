@@ -50,6 +50,12 @@ typedef struct
   float yaw_deg;
 } euler_angles_t;
 
+typedef enum
+{
+  APP_EULER_MODE_ZYX = 0U,
+  APP_EULER_MODE_ZXY = 1U
+} app_euler_mode_t;
+
 typedef struct
 {
   uint64_t timestamp_us;
@@ -59,7 +65,7 @@ typedef struct
   float pressure_pa;
   float temperature_c;
   euler_angles_t euler;
-  euler_angles_t accel_euler;
+  app_euler_mode_t euler_mode;
 } telemetry_sample_t;
 
 /* USER CODE END PTD */
@@ -125,6 +131,9 @@ typedef struct
 #define APP_DEG_TO_RAD                        0.017453292519943295f
 #define APP_RAD_TO_DEG                        57.29577951308232f
 #define APP_MADGWICK_IMU_ONLY_TEST            0U
+#define APP_EULER_SWITCH_TO_ZXY_DEG           80.0f
+#define APP_EULER_SWITCH_TO_ZYX_DEG           75.0f
+#define APP_EULER_ZXY_SINGULAR_MARGIN_DEG     80.0f
 
 #if defined(CAL_GYRO_ENABLE) || defined(CAL_ACCEL_ENABLE) || defined(CAL_MAG_ENABLE)
 #define APP_CAL_MODE_ACTIVE                   1U
@@ -220,6 +229,7 @@ static uint32_t app_last_mag_us = 0U;
 static uint32_t app_last_prs_us = 0U;
 static uint32_t app_last_telemetry_us = 0U;
 static uint8_t app_scheduler_started = 0U;
+static app_euler_mode_t app_euler_mode = APP_EULER_MODE_ZYX;
 #endif
 
 volatile mpu6500_status_t imu_status = MPU6500_ERROR;
@@ -249,7 +259,10 @@ static void App_ReadPressureCompensated(void);
 static void App_OrientationUpdateMadgwick(float delta_t_s);
 static void App_TelemetryUpdateSample(uint64_t timestamp_us);
 static void App_TelemetrySendCdc(void);
-static void App_UpdateAccelOnlyAngles(void);
+static void App_UpdateDisplayEuler(const struct quaternion *q);
+static void App_QuaternionToEulerZyx(const struct quaternion *q, euler_angles_t *euler);
+static void App_QuaternionToEulerZxy(const struct quaternion *q, euler_angles_t *euler);
+static float App_ClampFloat(float value, float min_value, float max_value);
 static float App_ClampOrientationDeltaTime(uint32_t delta_us);
 static uint64_t App_TimestampUs(void);
 #endif
@@ -823,10 +836,7 @@ static void App_OrientationUpdateMadgwick(float delta_t_s)
                gyro_rad_s_z);
   }
 
-  eulerAngles(q_est,
-              &telemetry_sample.euler.roll_deg,
-              &telemetry_sample.euler.pitch_deg,
-              &telemetry_sample.euler.yaw_deg);
+  App_UpdateDisplayEuler(&q_est);
 }
 
 static float App_ClampOrientationDeltaTime(uint32_t delta_us)
@@ -859,8 +869,6 @@ static void App_TelemetryUpdateSample(uint64_t timestamp_us)
     telemetry_sample.gyro_dps.x = gyro_compensated_raw.x / imu.gyro_lsb_per_dps;
     telemetry_sample.gyro_dps.y = gyro_compensated_raw.y / imu.gyro_lsb_per_dps;
     telemetry_sample.gyro_dps.z = gyro_compensated_raw.z / imu.gyro_lsb_per_dps;
-
-    App_UpdateAccelOnlyAngles();
   }
 
   if ((mag_status == LIS3MDL_OK) && (mag_read_status == LIS3MDL_OK))
@@ -882,14 +890,19 @@ static void App_TelemetrySendCdc(void)
   static char frame[384];
   int length;
   uint32_t timestamp_us_32 = (uint32_t)telemetry_sample.timestamp_us;
+  uint32_t timestamp_s = timestamp_us_32 / 1000000U;
+  uint32_t timestamp_ms = (timestamp_us_32 % 1000000U) / 1000U;
+  uint32_t timestamp_subms_us = timestamp_us_32 % 1000U;
 
   length = snprintf(frame,
                     sizeof(frame),
-                    "TUS=%lu,ACC_MPS2_1000=%ld,%ld,%ld,GYRO_MDPS=%ld,%ld,%ld,"
+                    "TS=%lu.%03lu.%03lu,ACC_MPS2_1000=%ld,%ld,%ld,GYRO_MDPS=%ld,%ld,%ld,"
                     "MAG_UT100=%ld,%ld,%ld,P_PA100=%ld,T_C100=%ld,"
-                    "ROLL_MDEG=%ld,PITCH_MDEG=%ld,YAW_MDEG=%ld,"
-                    "ACC_ROLL_MDEG=%ld,ACC_PITCH_MDEG=%ld\r\n",
-                    (unsigned long)timestamp_us_32,
+                    "ROLL_MDEG=%ld,PITCH_MDEG=%ld,YAW_MDEG=%ld,EULER_MODE=%lu,"
+                    "Q_X1000000=%ld,%ld,%ld,%ld\r\n",
+                    (unsigned long)timestamp_s,
+                    (unsigned long)timestamp_ms,
+                    (unsigned long)timestamp_subms_us,
                     (long)App_FloatToInt32Scaled(telemetry_sample.accel_mps2.x, 1000.0f),
                     (long)App_FloatToInt32Scaled(telemetry_sample.accel_mps2.y, 1000.0f),
                     (long)App_FloatToInt32Scaled(telemetry_sample.accel_mps2.z, 1000.0f),
@@ -904,8 +917,11 @@ static void App_TelemetrySendCdc(void)
                     (long)App_FloatToInt32Scaled(telemetry_sample.euler.roll_deg, 1000.0f),
                     (long)App_FloatToInt32Scaled(telemetry_sample.euler.pitch_deg, 1000.0f),
                     (long)App_FloatToInt32Scaled(telemetry_sample.euler.yaw_deg, 1000.0f),
-                    (long)App_FloatToInt32Scaled(telemetry_sample.accel_euler.roll_deg, 1000.0f),
-                    (long)App_FloatToInt32Scaled(telemetry_sample.accel_euler.pitch_deg, 1000.0f));
+                    (unsigned long)telemetry_sample.euler_mode,
+                    (long)App_FloatToInt32Scaled(q_est.q2, 1000000.0f),
+                    (long)App_FloatToInt32Scaled(q_est.q3, 1000000.0f),
+                    (long)App_FloatToInt32Scaled(q_est.q4, 1000000.0f),
+                    (long)App_FloatToInt32Scaled(q_est.q1, 1000000.0f));
 
   if ((length > 0) && (length < (int)sizeof(frame)))
   {
@@ -915,17 +931,106 @@ static void App_TelemetrySendCdc(void)
 #endif
 
 #if (APP_CAL_MODE_ACTIVE == 0U)
-static void App_UpdateAccelOnlyAngles(void)
+static void App_UpdateDisplayEuler(const struct quaternion *q)
 {
-  float ax = telemetry_sample.accel_mps2.x;
-  float ay = telemetry_sample.accel_mps2.y;
-  float az = telemetry_sample.accel_mps2.z;
+  euler_angles_t zyx;
+  euler_angles_t zxy;
 
-  telemetry_sample.accel_euler.roll_deg = atan2f(ay, az) * APP_RAD_TO_DEG;
-  telemetry_sample.accel_euler.pitch_deg = atan2f(-ax, sqrtf((ay * ay) + (az * az))) * APP_RAD_TO_DEG;
-  telemetry_sample.accel_euler.yaw_deg = 0.0f;
+  App_QuaternionToEulerZyx(q, &zyx);
+  App_QuaternionToEulerZxy(q, &zxy);
+
+  if (app_euler_mode == APP_EULER_MODE_ZYX)
+  {
+    if ((fabsf(zyx.pitch_deg) > APP_EULER_SWITCH_TO_ZXY_DEG) &&
+        (fabsf(zxy.roll_deg) < APP_EULER_ZXY_SINGULAR_MARGIN_DEG))
+    {
+      app_euler_mode = APP_EULER_MODE_ZXY;
+    }
+  }
+  else
+  {
+    if (fabsf(zyx.pitch_deg) < APP_EULER_SWITCH_TO_ZYX_DEG)
+    {
+      app_euler_mode = APP_EULER_MODE_ZYX;
+    }
+  }
+
+  if (app_euler_mode == APP_EULER_MODE_ZXY)
+  {
+    telemetry_sample.euler = zxy;
+  }
+  else
+  {
+    telemetry_sample.euler = zyx;
+  }
+
+  telemetry_sample.euler_mode = app_euler_mode;
+  HAL_GPIO_WritePin(LED_Blink_GPIO_Port,
+                    LED_Blink_Pin,
+                    (app_euler_mode == APP_EULER_MODE_ZXY) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static void App_QuaternionToEulerZyx(const struct quaternion *q, euler_angles_t *euler)
+{
+  float sin_pitch;
+
+  if ((q == NULL) || (euler == NULL))
+  {
+    return;
+  }
+
+  euler->roll_deg = atan2f((2.0f * ((q->q1 * q->q2) + (q->q3 * q->q4))),
+                           (1.0f - (2.0f * ((q->q2 * q->q2) + (q->q3 * q->q3))))) * APP_RAD_TO_DEG;
+
+  sin_pitch = 2.0f * ((q->q1 * q->q3) - (q->q4 * q->q2));
+  sin_pitch = App_ClampFloat(sin_pitch, -1.0f, 1.0f);
+  euler->pitch_deg = asinf(sin_pitch) * APP_RAD_TO_DEG;
+
+  euler->yaw_deg = atan2f((2.0f * ((q->q1 * q->q4) + (q->q2 * q->q3))),
+                          (1.0f - (2.0f * ((q->q3 * q->q3) + (q->q4 * q->q4))))) * APP_RAD_TO_DEG;
+}
+
+static void App_QuaternionToEulerZxy(const struct quaternion *q, euler_angles_t *euler)
+{
+  float r01;
+  float r11;
+  float r20;
+  float r21;
+  float r22;
+  float sin_roll;
+
+  if ((q == NULL) || (euler == NULL))
+  {
+    return;
+  }
+
+  r01 = 2.0f * ((q->q2 * q->q3) - (q->q1 * q->q4));
+  r11 = 1.0f - (2.0f * ((q->q2 * q->q2) + (q->q4 * q->q4)));
+  r20 = 2.0f * ((q->q2 * q->q4) - (q->q1 * q->q3));
+  r21 = 2.0f * ((q->q3 * q->q4) + (q->q1 * q->q2));
+  r22 = 1.0f - (2.0f * ((q->q2 * q->q2) + (q->q3 * q->q3)));
+
+  sin_roll = App_ClampFloat(r21, -1.0f, 1.0f);
+  euler->roll_deg = asinf(sin_roll) * APP_RAD_TO_DEG;
+  euler->pitch_deg = atan2f(-r20, r22) * APP_RAD_TO_DEG;
+  euler->yaw_deg = atan2f(-r01, r11) * APP_RAD_TO_DEG;
 }
 #endif
+
+static float App_ClampFloat(float value, float min_value, float max_value)
+{
+  if (value < min_value)
+  {
+    return min_value;
+  }
+
+  if (value > max_value)
+  {
+    return max_value;
+  }
+
+  return value;
+}
 
 static int32_t App_FloatToInt32Scaled(float value, float scale)
 {
